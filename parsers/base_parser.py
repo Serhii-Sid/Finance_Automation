@@ -3,9 +3,9 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Optional
 from config import COL_CARD
-from data_manager import standardize_df
-from finance_logic import adjust_balance_with_credit_limit
-from text_utils import detect_account_identity
+from src.data_manager import standardize_df
+from src.finance_logic import adjust_balance_with_credit_limit
+from src.text_utils import detect_account_identity
 
 logger = logging.getLogger(__name__)
 

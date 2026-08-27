@@ -3,7 +3,7 @@ import hashlib
 import logging
 import pandas as pd
 from typing import Optional
-from text_utils import _normalize_text
+from src.text_utils import _normalize_text
 from config import (
     CARDS_DICTIONARY, CATEGORIES_KEYWORDS, INCOME_CATEGORIES, AMBIGUOUS_CATEGORIES,
     COL_DESC, COL_CAT, COL_AMOUNT, COL_CARD, COL_DATE, COL_BALANCE, COL_ID, MCC_MAP, EXPENSES_CATEGORIES
@@ -475,7 +475,7 @@ def detect_internal_transfers(df: pd.DataFrame) -> pd.DataFrame:
         df.loc[income_mask & neg_mask, COL_CAT] = 'інші витрати'
 
     # 4. Фінальний Fallback (Перевірка білого списку) для гарантії відповідності ALLOWED_CATEGORIES
-    from data_manager import ALLOWED_CATEGORIES
+    from src.data_manager import ALLOWED_CATEGORIES
     whitelist_mask = ~df[COL_CAT].isin(ALLOWED_CATEGORIES) | df[COL_CAT].isna()
     if COL_AMOUNT in df.columns:
         df.loc[whitelist_mask & (df[COL_AMOUNT] < 0), COL_CAT] = 'інші витрати'

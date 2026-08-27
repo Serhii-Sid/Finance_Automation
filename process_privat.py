@@ -27,9 +27,9 @@ from parsers import (
     PumbParser, 
     MonoParser
 )
-from data_manager import standardize_df, clean_and_transform, reconcile_and_merge
-from finance_logic import apply_bank_specific_post_processing, detect_internal_transfers, process_cash_clearing
-from report_engine import save_final_ledger, generate_daily_dashboard
+from src.data_manager import standardize_df, clean_and_transform, reconcile_and_merge
+from src.finance_logic import apply_bank_specific_post_processing, detect_internal_transfers, process_cash_clearing
+from src.report_engine import save_final_ledger, generate_daily_dashboard
 
 # --- Налаштування логування ---
 logging.basicConfig(

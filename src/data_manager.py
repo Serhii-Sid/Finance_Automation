@@ -1,8 +1,8 @@
 import re
 import logging
 import pandas as pd
-from text_utils import _normalize_text, REGEX_CAT_CLEAN
-from finance_logic import classify_transfer, get_category_by_mcc, make_short_id_vectorized
+from src.text_utils import _normalize_text, REGEX_CAT_CLEAN
+from src.finance_logic import classify_transfer, get_category_by_mcc, make_short_id_vectorized
 from config import (
     COL_ID, COL_DATE, COL_CAT, COL_CARD, COL_DESC, COL_AMOUNT, COL_BALANCE, COL_MCC,
     IBAN_TO_CARD_MAP, CARDS_DICTIONARY, USEFUL_COLUMNS,
