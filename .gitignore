@@ -1,0 +1,17 @@
+notepad .gitignore
+# Системні логи
+*.log
+automation.log
+
+# Тимчасові файли Excel (файли блокування)
+~$*
+
+# Конфіденційні банківські виписки та фінальні звіти
+input_data/
+output/
+
+# Папки віртуального середовища Python та кеш
+.venv/
+venv/
+__pycache__/
+*.pyctxt_files/
