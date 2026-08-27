@@ -16,3 +16,6 @@ venv/
 __pycache__/
 *.pyc
 txt_files/
+
+# Налаштування редактора VS Code
+.vscode/
