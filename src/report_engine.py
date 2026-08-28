@@ -6,6 +6,7 @@ from openpyxl.utils import get_column_letter
 from config import (
     OUTPUT_FOLDER, OUTPUT_FILE, COL_DATE, COL_AMOUNT, COL_BALANCE, COL_ID, COL_CAT, COL_CARD, COL_DESC
 )
+from src.finance_logic import expand_commission_splits_for_reports
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,7 @@ def generate_daily_dashboard(df_ledger: pd.DataFrame) -> pd.DataFrame:
             'Різниця за день', 'Різниця за місяць', 'Різниця загалом'
         ])
     
-    df = df_ledger.copy()
+    df = expand_commission_splits_for_reports(df_ledger)
     df[COL_DATE] = pd.to_datetime(df[COL_DATE])
     # Localize to naive just in case
     if df[COL_DATE].dt.tz is not None:
@@ -165,8 +166,14 @@ def save_final_ledger(df: pd.DataFrame, df_dash: pd.DataFrame, script_path: str)
         }
         df_export.insert(2, 'Місяць', df_export[COL_DATE].dt.month.map(ukr_months) + " " + df_export[COL_DATE].dt.year.astype(str))
         
-        df_income = df_export[df_export[COL_AMOUNT] > 0].copy()
-        df_expenses = df_export[df_export[COL_AMOUNT] < 0].copy()
+        # Генеруємо аналітичний DataFrame із розщепленими комісіями для вкладок Expenses та Income
+        df_analytical = expand_commission_splits_for_reports(df)
+        df_analytical_export = df_analytical.copy()
+        df_analytical_export.insert(0, '№ п/п', range(1, len(df_analytical_export) + 1))
+        df_analytical_export.insert(2, 'Місяць', df_analytical_export[COL_DATE].dt.month.map(ukr_months) + " " + df_analytical_export[COL_DATE].dt.year.astype(str))
+
+        df_income = df_analytical_export[df_analytical_export[COL_AMOUNT] > 0].copy()
+        df_expenses = df_analytical_export[df_analytical_export[COL_AMOUNT] < 0].copy()
         
         cols_to_drop_analysis = ['№ п/п', 'Місяць']
         df_income = df_income.drop(columns=cols_to_drop_analysis, errors='ignore')
@@ -204,7 +211,17 @@ def save_final_ledger(df: pd.DataFrame, df_dash: pd.DataFrame, script_path: str)
                     thin_grid_side = Side(style='thin', color="A6A6A6")
                     thick_border_side = Side(style='medium', color="000000")
                     zebra_fill = PatternFill(start_color="E9E9E9", end_color="E9E9E9", fill_type="solid")
+                    split_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
                     data_alignment = Alignment(vertical="center")
+
+                    # Отримуємо індекс стовпця ID для підсвічування розщеплених рядків (тільки для аналітичних вкладок)
+                    id_col_idx = None
+                    if sheet_name in ('Expenses', 'Income'):
+                        for c_idx in range(1, sheet.max_column + 1):
+                            col_name = str(sheet.cell(row=1, column=c_idx).value or '').strip().lower()
+                            if 'id' in col_name or col_name == COL_ID.lower():
+                                id_col_idx = c_idx
+                                break
 
                     prev_period = None
                     group_start = 2
@@ -221,6 +238,13 @@ def save_final_ledger(df: pd.DataFrame, df_dash: pd.DataFrame, script_path: str)
                                 sheet.row_dimensions.group(group_start + 1, row_idx - 1, outline_level=1)
                             group_start = row_idx
 
+                        # Безпечна перевірка суфіксів Twins-транзакцій (_main та _comm)
+                        is_split_row = False
+                        if id_col_idx:
+                            val = str(sheet.cell(row=row_idx, column=id_col_idx).value or "")
+                            if val.endswith('_main') or val.endswith('_comm'):
+                                is_split_row = True
+
                         for col_idx in range(1, sheet.max_column + 1):
                             cell = sheet.cell(row=row_idx, column=col_idx)
                             top_s = thick_border_side if (sheet_name == 'Transactions' and is_new_period) else thin_grid_side
@@ -231,9 +255,13 @@ def save_final_ledger(df: pd.DataFrame, df_dash: pd.DataFrame, script_path: str)
                                 cell.alignment = Alignment(horizontal="center", vertical="center")
                             else:
                                 cell.alignment = data_alignment
-                            if is_even:
+                            
+                            if is_split_row:
+                                cell.fill = split_fill
+                            elif is_even:
                                 cell.fill = zebra_fill
                         prev_period = curr_period
+
 
                     if sheet_name == 'Transactions' and sheet.max_row > group_start:
                         sheet.row_dimensions.group(group_start + 1, sheet.max_row, outline_level=1)

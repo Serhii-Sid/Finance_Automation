@@ -242,6 +242,18 @@ def detect_internal_transfers(df: pd.DataFrame) -> pd.DataFrame:
 
     own_card_names = set(CARDS_DICTIONARY.values())
 
+    def is_own_card(card_val):
+        c_str = str(card_val)
+        if c_str in own_card_names:
+            return True
+        for name in own_card_names:
+            if name in c_str or c_str in name:
+                return True
+        for suffix in CARDS_DICTIONARY.keys():
+            if suffix in c_str:
+                return True
+        return False
+
     def to_naive(t):
         return t.replace(tzinfo=None) if t.tzinfo is not None else t
 
@@ -314,7 +326,7 @@ def detect_internal_transfers(df: pd.DataFrame) -> pd.DataFrame:
         neg_card  = neg_row[COL_CARD]
 
         # М'який матч вимагає, щоб картка-відправник була власною
-        if neg_card not in own_card_names:
+        if not is_own_card(neg_card):
             continue
 
         max_commission = max(abs_neg * COMMISSION_PCT, COMMISSION_FLAT)
@@ -329,7 +341,7 @@ def detect_internal_transfers(df: pd.DataFrame) -> pd.DataFrame:
             if pos_card == neg_card:
                 continue
             # Картка-отримувач також має бути власною
-            if pos_card not in own_card_names:
+            if not is_own_card(pos_card):
                 continue
 
             abs_pos = pos_row['abs_amount']
@@ -350,14 +362,11 @@ def detect_internal_transfers(df: pd.DataFrame) -> pd.DataFrame:
                 f"neg_idx={neg_idx} ({abs_neg:.2f}) + pos_idx={best_pos_idx} ({abs_pos:.2f}), "
                 f"комісія={commission:.2f} грн, час={best_time_diff}"
             )
-            if commission > 0:
-                splits_to_apply.append((neg_idx, best_pos_idx, abs_pos, commission))
-            else:
-                twin_indices.add((neg_idx, best_pos_idx))
+            twin_indices.add((neg_idx, best_pos_idx))
             already_matched.add(neg_idx)
             already_matched.add(best_pos_idx)
 
-    # ---------- Маркування знайдених пар (без комісійного розщеплення) ----------
+    # ---------- Маркування знайдених пар ----------
     for neg_idx, pos_idx in twin_indices:
         validated_own_indices.add(neg_idx)
         validated_own_indices.add(pos_idx)
@@ -385,57 +394,6 @@ def detect_internal_transfers(df: pd.DataFrame) -> pd.DataFrame:
                     f"detect_internal_transfers (Етап 2: Близнюки дохід): idx={pos_idx}, "
                     f"desc='{str(row_pos.get(COL_DESC, ''))[:60]}', amount={row_pos.get(COL_AMOUNT):.2f} → 'переказ з власного рахунку'"
                 )
-
-    # ---------- Застосування розщеплення транзакцій при наявності комісії ----------
-    if splits_to_apply:
-        new_rows_list = []
-        indices_to_drop = []
-        for neg_idx, pos_idx, abs_pos, commission in splits_to_apply:
-            row_neg = df.loc[neg_idx]
-            
-            # 1. Основне тіло переказу
-            body_row = row_neg.copy()
-            body_row[COL_AMOUNT] = -abs_pos
-            body_row[COL_CAT] = 'переказ на власний рахунок'
-            
-            # 2. Комісія
-            commission_row = row_neg.copy()
-            commission_row[COL_AMOUNT] = -commission
-            commission_row[COL_CAT] = 'інші витрати'
-            
-            new_rows_list.append(body_row)
-            new_rows_list.append(commission_row)
-            indices_to_drop.append(neg_idx)
-            
-            # Маркуємо вхідну транзакцію як переказ
-            validated_own_indices.add(pos_idx)
-            if df.loc[pos_idx, COL_CAT] != 'переказ з власного рахунку':
-                df.loc[pos_idx, COL_CAT] = 'переказ з власного рахунку'
-                changed_twin += 1
-                logger.info(
-                    f"detect_internal_transfers (Близнюки дохід при розщепленні): idx={pos_idx}, "
-                    f"desc='{str(df.loc[pos_idx, COL_DESC])[:60]}', amount={df.loc[pos_idx, COL_AMOUNT]:.2f} → 'переказ з власного рахунку'"
-                )
-        
-        # Видаляємо оригінальну транзакцію
-        df = df.drop(index=indices_to_drop)
-        
-        # Створюємо DataFrame з нових рядків
-        new_df = pd.DataFrame(new_rows_list)
-        # Генеруємо нові унікальні ID
-        new_df[COL_ID] = make_short_id_vectorized(new_df)
-        
-        # Призначаємо нові непересічні індекси для нових рядків
-        max_idx = df.index.max() if not df.empty else 0
-        new_df.index = range(max_idx + 1, max_idx + 1 + len(new_df))
-        
-        # Додаємо нові індекси основного тіла переказів до валідованих, щоб уникнути демоції
-        for k in range(len(splits_to_apply)):
-            body_idx = max_idx + 1 + 2 * k
-            validated_own_indices.add(body_idx)
-            
-        # Об'єднуємо з основним DataFrame
-        df = pd.concat([df, new_df])
 
     # Етап 3 (Демоція непідтверджених власних переказів)
     own_transfer_cats = {
@@ -616,3 +574,122 @@ def process_cash_clearing(df: pd.DataFrame) -> pd.DataFrame:
     # Сортування за датою для збереження хронології
     df_new = df_new.sort_values(by=COL_DATE, ascending=False).reset_index(drop=True)
     return df_new
+
+def expand_commission_splits_for_reports(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Генерує аналітичний DataFrame для звітів, розщеплюючи транзакції переказів з комісією "на льоту".
+    Для кожної пари внутрішнього переказу з комісією (наприклад, витрата -10 050.00 грн, прихід +10 000.00 грн):
+    - Оригінальна витратна транзакція (ID '50461728') розщеплюється на два рядки:
+        1. Основна сума: -10 000.00 грн, категорія 'переказ на власний рахунок', ID: '50461728_main'
+        2. Комісія: -50.00 грн, категорія 'інші витрати', ID: '50461728_comm'
+    - Оригінальний прихідний рядок залишається без змін з оригінальним ID.
+    """
+    if df is None or df.empty:
+        return df
+
+    df_out = df.copy()
+    own_card_names = set(CARDS_DICTIONARY.values())
+
+    def is_own_card(card_val):
+        c_str = str(card_val)
+        if c_str in own_card_names:
+            return True
+        for name in own_card_names:
+            if name in c_str or c_str in name:
+                return True
+        for suffix in CARDS_DICTIONARY.keys():
+            if suffix in c_str:
+                return True
+        return False
+
+    def to_naive(t):
+        return t.replace(tzinfo=None) if hasattr(t, 'tzinfo') and t.tzinfo is not None else t
+
+    valid_mask = df_out[COL_AMOUNT].notna() & df_out[COL_DATE].notna()
+    valid_df = df_out[valid_mask].copy()
+    valid_df['abs_amount'] = valid_df[COL_AMOUNT].abs().round(2)
+    valid_df = valid_df[valid_df['abs_amount'] > 0]
+    valid_df['naive_date'] = pd.to_datetime(valid_df[COL_DATE]).apply(to_naive)
+
+    COMMISSION_PCT  = 0.01   # 1%
+    COMMISSION_FLAT = 100.0  # 100 грн
+
+    pos_all = valid_df[(valid_df[COL_AMOUNT] > 0) & (valid_df[COL_CAT] == 'переказ з власного рахунку')].sort_values('naive_date')
+    neg_all = valid_df[(valid_df[COL_AMOUNT] < 0) & (valid_df[COL_CAT] == 'переказ на власний рахунок')].sort_values('naive_date')
+
+    already_matched = set()
+    splits_to_apply = []
+
+    for neg_idx, neg_row in neg_all.iterrows():
+        if neg_idx in already_matched:
+            continue
+        abs_neg  = neg_row['abs_amount']
+        neg_time = neg_row['naive_date']
+        neg_card = neg_row[COL_CARD]
+
+        if not is_own_card(neg_card):
+            continue
+
+        max_commission = max(abs_neg * COMMISSION_PCT, COMMISSION_FLAT)
+        best_pos_idx = None
+        best_time_diff = pd.Timedelta(days=99999)
+
+        for pos_idx, pos_row in pos_all.iterrows():
+            if pos_idx in already_matched:
+                continue
+            pos_card = pos_row[COL_CARD]
+            if pos_card == neg_card:
+                continue
+            if not is_own_card(pos_card):
+                continue
+
+            abs_pos = pos_row['abs_amount']
+            if not (abs_pos < abs_neg and (abs_neg - abs_pos) <= max_commission):
+                continue
+
+            time_diff = abs(neg_time - pos_row['naive_date'])
+            if time_diff <= pd.Timedelta(minutes=5) and time_diff < best_time_diff:
+                best_time_diff = time_diff
+                best_pos_idx = pos_idx
+
+        if best_pos_idx is not None:
+            abs_pos = pos_all.loc[best_pos_idx, 'abs_amount']
+            commission = round(abs_neg - abs_pos, 2)
+            if commission > 0:
+                splits_to_apply.append((neg_idx, abs_pos, commission))
+            already_matched.add(neg_idx)
+            already_matched.add(best_pos_idx)
+
+    if not splits_to_apply:
+        return df_out
+
+    new_rows = []
+    indices_to_drop = []
+
+    for neg_idx, abs_pos, commission in splits_to_apply:
+        orig_row = df_out.loc[neg_idx]
+        orig_id = str(orig_row.get(COL_ID, ''))
+
+        # 1. Основна сума
+        main_row = orig_row.copy()
+        main_row[COL_AMOUNT] = -abs_pos
+        main_row[COL_CAT] = 'переказ на власний рахунок'
+        main_row[COL_ID] = f"{orig_id}_main"
+
+        # 2. Комісія
+        comm_row = orig_row.copy()
+        comm_row[COL_AMOUNT] = -commission
+        comm_row[COL_CAT] = 'інші витрати'
+        comm_row[COL_ID] = f"{orig_id}_comm"
+
+        new_rows.append(main_row)
+        new_rows.append(comm_row)
+        indices_to_drop.append(neg_idx)
+
+    df_out = df_out.drop(index=indices_to_drop)
+    new_df = pd.DataFrame(new_rows)
+    df_out = pd.concat([df_out, new_df], ignore_index=True)
+    df_out = df_out.sort_values(by=COL_DATE, ascending=False).reset_index(drop=True)
+
+    return df_out
+
