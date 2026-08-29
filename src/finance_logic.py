@@ -448,9 +448,97 @@ def detect_internal_transfers(df: pd.DataFrame) -> pd.DataFrame:
 
 def process_cash_clearing(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Тимчасова заглушка для декомісії старої логіки компенсації готівки.
-    Просто повертає DataFrame без змін для проведення базового тесту (baseline).
+    Математичне ядро компенсації готівки з 10-денним часовим буфером наступного місяця.
     """
+    if df is None or df.empty:
+        return df
+
+    if COL_DATE not in df.columns or COL_CAT not in df.columns or COL_AMOUNT not in df.columns:
+        return df
+
+    # 1. Відокремлення двох груп транзакцій (хронологічно від найстаріших до найновіших)
+    mask_withdrawals = (df[COL_CAT] == 'зняття готівки') & (df[COL_AMOUNT] < 0)
+    mask_deposits = (df[COL_CAT] == 'поповнення готівкою') & (df[COL_AMOUNT] > 0)
+
+    withdrawals_df = df[mask_withdrawals].sort_values(by=COL_DATE, ascending=True).copy()
+    deposits_df = df[mask_deposits].sort_values(by=COL_DATE, ascending=True).copy()
+
+    if withdrawals_df.empty or deposits_df.empty:
+        return df
+
+    def to_naive(t):
+        if hasattr(t, 'tzinfo') and t.tzinfo is not None:
+            return t.replace(tzinfo=None)
+        return t
+
+    # 2. Створення deposit_tracker для відстеження некомпенсованого залишку депозитів
+    deposit_tracker = {}
+    for idx, row in deposits_df.iterrows():
+        dep_id = row.get(COL_ID, idx)
+        dep_date = to_naive(row[COL_DATE])
+        dep_amount = float(row[COL_AMOUNT] or 0.0)
+        deposit_tracker[idx] = {
+            'id': dep_id,
+            'date': dep_date,
+            'date_str': dep_date.strftime('%Y-%m-%d %H:%M:%S') if hasattr(dep_date, 'strftime') else str(dep_date),
+            'initial_amount': dep_amount,
+            'remaining_amount': dep_amount
+        }
+
+    # 3. Групування зняття за роком та місяцем
+    withdrawals_df['naive_date'] = withdrawals_df[COL_DATE].apply(to_naive)
+    withdrawals_df['w_year'] = withdrawals_df['naive_date'].dt.year
+    withdrawals_df['w_month'] = withdrawals_df['naive_date'].dt.month
+
+    grouped_withdrawals = withdrawals_df.groupby(['w_year', 'w_month'], sort=True)
+
+    # 4. Проходимо по кожному місяцю зняття M
+    for (yr, mn), group in grouped_withdrawals:
+        # Початок: 1-ше число місяця M (00:00:00)
+        # Кінець: 10-те число наступного місяця M+1 (23:59:59)
+        window_start = pd.Timestamp(year=yr, month=mn, day=1, hour=0, minute=0, second=0)
+        
+        if mn == 12:
+            next_yr = yr + 1
+            next_mn = 1
+        else:
+            next_yr = yr
+            next_mn = mn + 1
+            
+        window_end = pd.Timestamp(year=next_yr, month=next_mn, day=10, hour=23, minute=59, second=59)
+
+        # Проходимо по кожному зняттю в даному місяці
+        for w_idx, w_row in group.iterrows():
+            w_id = w_row.get(COL_ID, w_idx)
+            w_date = w_row['naive_date']
+            w_date_str = w_date.strftime('%Y-%m-%d %H:%M:%S') if hasattr(w_date, 'strftime') else str(w_date)
+            w_remaining = abs(float(w_row[COL_AMOUNT] or 0.0))
+
+            if w_remaining <= 0:
+                continue
+
+            # FIFO-списання за рахунок депозитів у визначеному часовому вікні
+            for d_idx, dep_info in deposit_tracker.items():
+                if w_remaining <= 0:
+                    break
+                
+                dep_date = dep_info['date']
+                if window_start <= dep_date <= window_end and dep_info['remaining_amount'] > 0:
+                    cleared_amount = min(w_remaining, dep_info['remaining_amount'])
+                    
+                    dep_info['remaining_amount'] -= cleared_amount
+                    w_remaining -= cleared_amount
+
+                    d_id = dep_info['id']
+                    d_date_str = dep_info['date_str']
+                    dep_remaining = dep_info['remaining_amount']
+
+                    logger.info(
+                        f"CASH MATCH: Withdrawal {w_id} ({w_date_str}) matched with Deposit {d_id} ({d_date_str}) "
+                        f"for {cleared_amount:.2f} грн. Remaining dep: {dep_remaining:.2f} грн."
+                    )
+
+    # На цьому кроці повертаємо оригінальний DataFrame без змін
     return df
 
 def expand_commission_splits_for_reports(df: pd.DataFrame) -> pd.DataFrame:
