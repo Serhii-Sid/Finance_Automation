@@ -11,6 +11,42 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
+class ReconciliationRegistry:
+    _records = []
+    
+    @classmethod
+    def clear(cls):
+        cls._records = []
+        
+    @classmethod
+    def register(cls, date_left, id_left, desc_left, amount_left, date_right, id_right, desc_right, amount_right, cleared_amount, remaining_left, clear_type):
+        cls._records.append({
+            'Дата відправки/зняття': date_left,
+            'ID джерела': id_left,
+            'Опис джерела': desc_left,
+            'Сума джерела': amount_left,
+            'Зв\'язок': '➔ ➔ ➔',
+            'Дата отримання/поповнення': date_right,
+            'ID отримувача': id_right,
+            'Опис отримувача': desc_right,
+            'Сума отримувача': amount_right,
+            'Сума компенсації': cleared_amount,
+            'Залишок джерела': remaining_left,
+            'Тип компенсації': clear_type
+        })
+        
+    @classmethod
+    def get_df(cls):
+        if not cls._records:
+            return pd.DataFrame(columns=[
+                'Дата відправки/зняття', 'ID джерела', 'Опис джерела', 'Сума джерела',
+                'Зв\'язок', 'Дата отримання/поповнення', 'ID отримувача', 'Опис отримувача',
+                'Сума отримувача', 'Сума компенсації', 'Залишок джерела', 'Тип компенсації'
+            ])
+        df = pd.DataFrame(cls._records)
+        df['Дата відправки/зняття'] = pd.to_datetime(df['Дата відправки/зняття'])
+        return df.sort_values(by='Дата відправки/зняття', ascending=False).reset_index(drop=True)
+
 def make_short_id_vectorized(df: pd.DataFrame) -> pd.Series:
     """Генерація унікальних ID для транзакцій."""
     combined = (
@@ -137,6 +173,7 @@ def detect_internal_transfers(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
 
+    ReconciliationRegistry.clear()
     df = df.reset_index(drop=True)
 
     # 0. Пріоритет брендів: Класифікуємо/захищаємо категорію брендів перед перевірками
@@ -371,6 +408,23 @@ def detect_internal_transfers(df: pd.DataFrame) -> pd.DataFrame:
         validated_own_indices.add(neg_idx)
         validated_own_indices.add(pos_idx)
 
+        row_out = df.loc[neg_idx]
+        row_in = df.loc[pos_idx]
+
+        ReconciliationRegistry.register(
+            date_left=row_out[COL_DATE],
+            id_left=row_out.get(COL_ID, neg_idx),
+            desc_left=row_out.get(COL_DESC, ''),
+            amount_left=row_out.get(COL_AMOUNT, 0.0),
+            date_right=row_in[COL_DATE],
+            id_right=row_in.get(COL_ID, pos_idx),
+            desc_right=row_in.get(COL_DESC, ''),
+            amount_right=row_in.get(COL_AMOUNT, 0.0),
+            cleared_amount=abs(float(row_in.get(COL_AMOUNT, 0.0) or 0.0)),
+            remaining_left=0.0,
+            clear_type='Twins (Картка ➔ Картка)'
+        )
+
         # Для витрати (neg)
         row_neg = df.loc[neg_idx]
         current_cat_neg = row_neg.get(COL_CAT)
@@ -558,6 +612,23 @@ def process_cash_clearing(df: pd.DataFrame) -> pd.DataFrame:
                                 'with_id': w_id,
                                 'amount': cleared_amount
                             })
+
+                            dep_row = dep_info['orig_row']
+                            w_row = w_info['orig_row']
+
+                            ReconciliationRegistry.register(
+                                date_left=w_row[COL_DATE],
+                                id_left=w_id,
+                                desc_left=w_row.get(COL_DESC, ''),
+                                amount_left=w_row.get(COL_AMOUNT, 0.0),
+                                date_right=dep_row[COL_DATE],
+                                id_right=dep_id,
+                                desc_right=dep_row.get(COL_DESC, ''),
+                                amount_right=dep_row.get(COL_AMOUNT, 0.0),
+                                cleared_amount=cleared_amount,
+                                remaining_left=w_info['remaining_amount_abs'],
+                                clear_type='Cash Clearing (Готівка)'
+                            )
 
                             logger.info(
                                 f"CASH MATCH: Withdrawal {w_id} ({w_date_str}) matched with Deposit {dep_id} ({dep_info['date_str']}) "

@@ -154,10 +154,14 @@ def rotate_outputs():
     if os.path.exists(OUTPUT_FILE): 
         os.replace(OUTPUT_FILE, os.path.join(OUTPUT_FOLDER, base_name.format(1)))
 
-def save_final_ledger(df: pd.DataFrame, df_dash: pd.DataFrame, script_path: str, df_analytical: Optional[pd.DataFrame] = None):
-    """Зберігає фінальний Excel з двома рівнями заголовків на вкладці Daily_Dashboard та колірним оформленням."""
+def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, script_path: str = "", df_analytical: Optional[pd.DataFrame] = None):
+    """Зберігає фінальний Excel з 5 листами (Total_Ledger, Income, Reconciliation_Audit, Expenses, Daily_Dashboard)."""
     try:
         rotate_outputs()
+
+        from src.finance_logic import detect_internal_transfers, process_cash_clearing, ReconciliationRegistry
+
+        # 1. Сирий недоторканий DataFrame для листа 'Total_Ledger'
         df_export = df.copy()
         df_export.insert(0, '№ п/п', range(1, len(df_export) + 1))
         
@@ -167,13 +171,20 @@ def save_final_ledger(df: pd.DataFrame, df_dash: pd.DataFrame, script_path: str,
         }
         df_export.insert(2, 'Місяць', df_export[COL_DATE].dt.month.map(ukr_months) + " " + df_export[COL_DATE].dt.year.astype(str))
         
-        # Використовуємо наданий або базовий аналітичний DataFrame для вкладок Expenses та Income
+        # 2. Формування df_analytical та збір аудиторського реєстру ReconciliationRegistry
         if df_analytical is None:
-            df_analytical_base = df
-        else:
-            df_analytical_base = df_analytical
+            df_analytical = detect_internal_transfers(df.copy())
+            df_analytical = process_cash_clearing(df_analytical)
 
-        df_analytical_processed = expand_commission_splits_for_reports(df_analytical_base)
+        # 3. Аудиторський DataFrame
+        df_audit = ReconciliationRegistry.get_df()
+
+        # 4. Дашборд
+        if df_dash is None or df_dash.empty:
+            df_dash = generate_daily_dashboard(df_analytical)
+
+        # 5. Підготовка експорту для вкладок Income та Expenses
+        df_analytical_processed = expand_commission_splits_for_reports(df_analytical)
         df_analytical_export = df_analytical_processed.copy()
         df_analytical_export.insert(0, '№ п/п', range(1, len(df_analytical_export) + 1))
         df_analytical_export.insert(2, 'Місяць', df_analytical_export[COL_DATE].dt.month.map(ukr_months) + " " + df_analytical_export[COL_DATE].dt.year.astype(str))
@@ -185,20 +196,22 @@ def save_final_ledger(df: pd.DataFrame, df_dash: pd.DataFrame, script_path: str,
         df_income = df_income.drop(columns=cols_to_drop_analysis, errors='ignore')
         df_expenses = df_expenses.drop(columns=cols_to_drop_analysis, errors='ignore')
 
+        # Запис п'яти листів у суворо визначеному порядку:
+        # 1. Total_Ledger, 2. Income, 3. Reconciliation_Audit, 4. Expenses, 5. Daily_Dashboard
         with pd.ExcelWriter(OUTPUT_FILE, engine='openpyxl', datetime_format='dd.mm.yyyy hh:mm:ss') as writer:
-            df_export.to_excel(writer, index=False, sheet_name='Transactions')
-            df_expenses.to_excel(writer, index=False, sheet_name='Expenses')
+            df_export.to_excel(writer, index=False, sheet_name='Total_Ledger')
             df_income.to_excel(writer, index=False, sheet_name='Income')
-            
-            # Записуємо Daily_Dashboard з першого рядка з заголовками з DataFrame
+            df_audit.to_excel(writer, index=False, sheet_name='Reconciliation_Audit')
+            df_expenses.to_excel(writer, index=False, sheet_name='Expenses')
             df_dash.to_excel(writer, index=False, sheet_name='Daily_Dashboard')
 
-            # Отримуємо об'єкти листів
-            for sheet_name in ['Transactions', 'Expenses', 'Income', 'Daily_Dashboard']:
+            # Стилізація листів
+            for sheet_name in ['Total_Ledger', 'Income', 'Reconciliation_Audit', 'Expenses', 'Daily_Dashboard']:
                 sheet = writer.sheets[sheet_name]
+                sheet.views.sheetView[0].showGridLines = True
                 
-                if sheet_name != 'Daily_Dashboard':
-                    # Стандартна стилізація для перших 3-х вкладок
+                if sheet_name in ('Total_Ledger', 'Income', 'Expenses'):
+                    # Стандартна стилізація для основних таблиць
                     sheet.row_dimensions[1].height = 30
                     header_fill = PatternFill(start_color="5A5A5A", end_color="5A5A5A", fill_type="solid")
                     header_font = Font(bold=True, color="FFFFFF", size=12)
@@ -220,9 +233,9 @@ def save_final_ledger(df: pd.DataFrame, df_dash: pd.DataFrame, script_path: str,
                     split_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
                     data_alignment = Alignment(vertical="center")
 
-                    # Отримуємо індекс стовпця ID для підсвічування розщеплених рядків (тільки для аналітичних вкладок)
+                    # Отримуємо індекс стовпця ID для підсвічування розщеплених рядків
                     id_col_idx = None
-                    if sheet_name in ('Expenses', 'Income'):
+                    if sheet_name in ('Expenses', 'Income', 'Total_Ledger'):
                         for c_idx in range(1, sheet.max_column + 1):
                             col_name = str(sheet.cell(row=1, column=c_idx).value or '').strip().lower()
                             if 'id' in col_name or col_name == COL_ID.lower():
@@ -234,26 +247,26 @@ def save_final_ledger(df: pd.DataFrame, df_dash: pd.DataFrame, script_path: str,
                     for row_idx in range(2, sheet.max_row + 1):
                         curr_period = None
                         is_new_period = False
-                        if sheet_name == 'Transactions':
+                        if sheet_name == 'Total_Ledger':
                             curr_period = sheet.cell(row=row_idx, column=3).value
                             is_new_period = prev_period is not None and curr_period != prev_period
                         is_even = row_idx % 2 == 0
 
-                        if is_new_period and sheet_name == 'Transactions':
+                        if is_new_period and sheet_name == 'Total_Ledger':
                             if row_idx - 1 > group_start:
                                 sheet.row_dimensions.group(group_start + 1, row_idx - 1, outline_level=1)
                             group_start = row_idx
 
-                        # Безпечна перевірка суфіксів Twins-транзакцій (_main та _comm)
+                        # Безпечна перевірка суфіксів Twins-транзакцій та Clearing
                         is_split_row = False
                         if id_col_idx:
                             val = str(sheet.cell(row=row_idx, column=id_col_idx).value or "")
-                            if val.endswith('_main') or val.endswith('_comm'):
+                            if val.endswith('_main') or val.endswith('_comm') or '_clear_' in val:
                                 is_split_row = True
 
                         for col_idx in range(1, sheet.max_column + 1):
                             cell = sheet.cell(row=row_idx, column=col_idx)
-                            top_s = thick_border_side if (sheet_name == 'Transactions' and is_new_period) else thin_grid_side
+                            top_s = thick_border_side if (sheet_name == 'Total_Ledger' and is_new_period) else thin_grid_side
                             cell.border = Border(left=thin_grid_side, right=thin_grid_side, top=top_s, bottom=thin_grid_side)
                             
                             header_val = sheet.cell(row=1, column=col_idx).value
@@ -268,13 +281,56 @@ def save_final_ledger(df: pd.DataFrame, df_dash: pd.DataFrame, script_path: str,
                                 cell.fill = zebra_fill
                         prev_period = curr_period
 
-
-                    if sheet_name == 'Transactions' and sheet.max_row > group_start:
+                    if sheet_name == 'Total_Ledger' and sheet.max_row > group_start:
                         sheet.row_dimensions.group(group_start + 1, sheet.max_row, outline_level=1)
                         sheet.sheet_properties.outlinePr.summaryBelow = False
 
                     sheet.freeze_panes = "A2"
                     sheet.auto_filter.ref = sheet.dimensions
+
+                elif sheet_name == 'Reconciliation_Audit':
+                    sheet.row_dimensions[1].height = 30
+                    header_fill = PatternFill(start_color="5A5A5A", end_color="5A5A5A", fill_type="solid")
+                    header_font = Font(bold=True, color="FFFFFF", size=11)
+                    header_alignment = Alignment(horizontal="center", vertical="center")
+                    thin_grid_side = Side(style='thin', color="A6A6A6")
+                    header_border = Border(left=thin_grid_side, right=thin_grid_side, top=thin_grid_side, bottom=thin_grid_side)
+
+                    for cell in sheet[1]:
+                        if cell.value is not None:
+                            cell.font = header_font
+                            cell.fill = header_fill
+                            cell.alignment = header_alignment
+                            cell.border = header_border
+
+                    lavender_fill = PatternFill(start_color="E6E6FA", end_color="E6E6FA", fill_type="solid")
+                    green_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+
+                    type_col_idx = None
+                    for c_idx in range(1, sheet.max_column + 1):
+                        col_val = str(sheet.cell(row=1, column=c_idx).value or '').strip()
+                        if col_val == 'Тип компенсації':
+                            type_col_idx = c_idx
+                            break
+
+                    for row_idx in range(2, sheet.max_row + 1):
+                        clear_type = str(sheet.cell(row=row_idx, column=type_col_idx).value or '') if type_col_idx else ''
+                        row_fill = None
+                        if 'Twins' in clear_type:
+                            row_fill = lavender_fill
+                        elif 'Cash Clearing' in clear_type or 'Готівка' in clear_type:
+                            row_fill = green_fill
+
+                        for col_idx in range(1, sheet.max_column + 1):
+                            cell = sheet.cell(row=row_idx, column=col_idx)
+                            cell.border = Border(left=thin_grid_side, right=thin_grid_side, top=thin_grid_side, bottom=thin_grid_side)
+                            if row_fill:
+                                cell.fill = row_fill
+                            cell.alignment = Alignment(vertical="center")
+
+                    sheet.freeze_panes = "A2"
+                    if sheet.max_row >= 1 and sheet.max_column >= 1:
+                        sheet.auto_filter.ref = sheet.dimensions
 
                 else:
                     # Стилізація Daily_Dashboard
@@ -361,21 +417,10 @@ def save_final_ledger(df: pd.DataFrame, df_dash: pd.DataFrame, script_path: str,
                                 if is_rahom:
                                     if col_idx == 6:
                                         cell.font = Font(bold=True, italic=True, size=10, color="000000")
-                                    elif col_idx == 7:
-                                        cell.font = Font(bold=True, italic=True, size=12, color="000000")
-                                    elif col_idx == 8:
-                                        cell.font = Font(bold=True, italic=True, size=14, color="000000")
                                     else:
-                                        cell.font = Font(bold=True, italic=True, size=12, color="000000")
+                                        cell.font = Font(bold=True, size=11, color="000000")
                                 else:
-                                    if col_idx == 6:
-                                        cell.font = Font(size=10, color="000000")
-                                    elif col_idx == 7:
-                                        cell.font = Font(size=12, color="000000")
-                                    elif col_idx == 8:
-                                        cell.font = Font(size=14, color="000000")
-                                    else:
-                                        cell.font = Font(size=11, color="000000")
+                                    cell.font = Font(size=11, color="000000")
 
                                 if col_idx in (1, 2):
                                     if is_rahom:
@@ -406,7 +451,8 @@ def save_final_ledger(df: pd.DataFrame, df_dash: pd.DataFrame, script_path: str,
                                 if isinstance(val, (int, float)):
                                     is_fin = header_val in (
                                         'Сума', COL_AMOUNT, 'Залишок', COL_BALANCE, 'План', 'Витрати', 
-                                        'Дохід', 'Різниця за день', 'Різниця за місяць', 'Різниця загалом'
+                                        'Дохід', 'Різниця за день', 'Різниця за місяць', 'Різниця загалом',
+                                        'Сума джерела', 'Сума отримувача', 'Сума компенсації', 'Залишок джерела'
                                     )
                                     val_str = f"{val:,.2f}" if is_fin else f"{int(val)}" if val == int(val) else str(val)
                                 elif isinstance(val, (datetime.datetime, pd.Timestamp)):
