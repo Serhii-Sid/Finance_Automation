@@ -156,14 +156,18 @@ def main():
         # Застосовуємо оновлену категоризацію до всієї бази
         df_final = clean_and_transform(df_final)
 
-        # Визначаємо внутрішні перекази між власними рахунками
+        # Визначаємо внутрішні перекази між власними рахунками (первинний реєстр)
         df_final = detect_internal_transfers(df_final)
 
-        # Інтелектуальна компенсація готівкових потоків
-        df_final = process_cash_clearing(df_final)
+        # Інтелектуальна компенсація готівкових потоків (окрема аналітична копія)
+        df_analytical = process_cash_clearing(df_final)
 
-        df_dash = generate_daily_dashboard(df_final)
-        save_final_ledger(df_final, df_dash, __file__)
+        # Дашборд формуємо на основі аналітичного DataFrame
+        df_dash = generate_daily_dashboard(df_analytical)
+
+        # Зберігаємо леджер: первинний реєстр (df_final) записується на лист 'Transactions',
+        # а аналітична копія (df_analytical) використовується для вкладок 'Expenses' та 'Income'
+        save_final_ledger(df_final, df_dash, __file__, df_analytical=df_analytical)
 
         # --- Тестовий звіт у консоль ---
         print("\n" + "="*40)

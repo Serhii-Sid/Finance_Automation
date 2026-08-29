@@ -1,5 +1,6 @@
 import os
 import logging
+from typing import Optional
 import pandas as pd
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -153,7 +154,7 @@ def rotate_outputs():
     if os.path.exists(OUTPUT_FILE): 
         os.replace(OUTPUT_FILE, os.path.join(OUTPUT_FOLDER, base_name.format(1)))
 
-def save_final_ledger(df: pd.DataFrame, df_dash: pd.DataFrame, script_path: str):
+def save_final_ledger(df: pd.DataFrame, df_dash: pd.DataFrame, script_path: str, df_analytical: Optional[pd.DataFrame] = None):
     """Зберігає фінальний Excel з двома рівнями заголовків на вкладці Daily_Dashboard та колірним оформленням."""
     try:
         rotate_outputs()
@@ -166,9 +167,14 @@ def save_final_ledger(df: pd.DataFrame, df_dash: pd.DataFrame, script_path: str)
         }
         df_export.insert(2, 'Місяць', df_export[COL_DATE].dt.month.map(ukr_months) + " " + df_export[COL_DATE].dt.year.astype(str))
         
-        # Генеруємо аналітичний DataFrame із розщепленими комісіями для вкладок Expenses та Income
-        df_analytical = expand_commission_splits_for_reports(df)
-        df_analytical_export = df_analytical.copy()
+        # Використовуємо наданий або базовий аналітичний DataFrame для вкладок Expenses та Income
+        if df_analytical is None:
+            df_analytical_base = df
+        else:
+            df_analytical_base = df_analytical
+
+        df_analytical_processed = expand_commission_splits_for_reports(df_analytical_base)
+        df_analytical_export = df_analytical_processed.copy()
         df_analytical_export.insert(0, '№ п/п', range(1, len(df_analytical_export) + 1))
         df_analytical_export.insert(2, 'Місяць', df_analytical_export[COL_DATE].dt.month.map(ukr_months) + " " + df_analytical_export[COL_DATE].dt.year.astype(str))
 
