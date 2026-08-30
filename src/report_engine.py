@@ -7,7 +7,13 @@ from openpyxl.utils import get_column_letter
 from config import (
     OUTPUT_FOLDER, OUTPUT_FILE, COL_DATE, COL_AMOUNT, COL_BALANCE, COL_ID, COL_CAT, COL_CARD, COL_DESC
 )
-from src.finance_logic import expand_commission_splits_for_reports
+import datetime
+from src.finance_logic import (
+    expand_commission_splits_for_reports,
+    detect_internal_transfers,
+    process_cash_clearing,
+    ReconciliationRegistry
+)
 
 logger = logging.getLogger(__name__)
 
@@ -200,16 +206,16 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
         ])
 
         # Запис п'яти листів у суворо визначеному порядку:
-        # 1. Total_Ledger, 2. Income, 3. Reconciliation_Audit, 4. Expenses, 5. Daily_Dashboard
+        # 1. Total_Ledger, 2. Income, 3. Expenses, 4. Reconciliation_Audit, 5. Daily_Dashboard
         with pd.ExcelWriter(OUTPUT_FILE, engine='openpyxl', datetime_format='dd.mm.yyyy hh:mm:ss') as writer:
             df_export.to_excel(writer, index=False, sheet_name='Total_Ledger')
             df_income.to_excel(writer, index=False, sheet_name='Income')
-            df_audit_header.to_excel(writer, index=False, sheet_name='Reconciliation_Audit')
             df_expenses.to_excel(writer, index=False, sheet_name='Expenses')
+            df_audit_header.to_excel(writer, index=False, sheet_name='Reconciliation_Audit')
             df_dash.to_excel(writer, index=False, sheet_name='Daily_Dashboard')
 
             # Стилізація листів
-            for sheet_name in ['Total_Ledger', 'Income', 'Reconciliation_Audit', 'Expenses', 'Daily_Dashboard']:
+            for sheet_name in ['Total_Ledger', 'Income', 'Expenses', 'Reconciliation_Audit', 'Daily_Dashboard']:
                 sheet = writer.sheets[sheet_name]
                 sheet.views.sheetView[0].showGridLines = True
                 
@@ -325,34 +331,55 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
 
                     df_audit_data = ReconciliationRegistry.get_df()
 
+                    events = []
                     if not df_audit_data.empty and 'Тип компенсації' in df_audit_data.columns:
                         df_cash = df_audit_data[df_audit_data['Тип компенсації'].str.contains('Cash Clearing|Готівка', case=False, na=False)].copy()
                         df_twins = df_audit_data[df_audit_data['Тип компенсації'].str.contains('Twins', case=False, na=False)].copy()
-                    else:
-                        df_cash = pd.DataFrame()
-                        df_twins = pd.DataFrame()
+
+                        # 1. Події Cash Clearing (групування за ID зняття)
+                        if not df_cash.empty:
+                            grouped_cash = df_cash.groupby('ID зняття', sort=False)
+                            for w_id, group in grouped_cash:
+                                first_w_date = pd.to_datetime(group.iloc[0]['Дата зняття'])
+                                events.append({
+                                    'type': 'cash',
+                                    'date': first_w_date,
+                                    'data': group
+                                })
+
+                        # 2. Події Twins (кожна транзакція — окрема подія)
+                        if not df_twins.empty:
+                            for _, t_row in df_twins.iterrows():
+                                t_date = pd.to_datetime(t_row['Дата зняття'])
+                                events.append({
+                                    'type': 'twins',
+                                    'date': t_date,
+                                    'data': t_row
+                                })
+
+                    # 3. Сортування всіх подій у порядку СПАДАННЯ (від найновіших до найстаріших)
+                    events.sort(key=lambda x: x['date'], reverse=True)
 
                     current_row = 2
 
-                    # а) Блоки Cash Clearing (Parent-Child-Summary)
-                    if not df_cash.empty:
-                        grouped_cash = df_cash.groupby('ID зняття', sort=False)
-
-                        for w_id, group in grouped_cash:
+                    for event in events:
+                        if event['type'] == 'cash':
+                            group = event['data']
                             first_row = group.iloc[0]
                             w_date = first_row['Дата зняття']
+                            w_id = str(first_row['ID зняття'])
                             w_desc = str(first_row.get('Опис зняття', '') or '')
                             w_amount = float(first_row.get('Сума зняття', 0.0) or 0.0)
 
                             # --- PARENT ROW ---
                             parent_vals = [
                                 w_date,
-                                str(w_id),
+                                w_id,
                                 w_desc,
                                 w_amount,
                                 None,
                                 None,
-                                "Оригінальне зняття готівки"
+                                f"Оригінальне зняття готівки з '{w_desc}'"
                             ]
                             sheet.row_dimensions[current_row].height = 24
                             for c_idx, val in enumerate(parent_vals, 1):
@@ -362,8 +389,11 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                                 cell.border = header_border
                                 if c_idx in (1, 2):
                                     cell.alignment = align_center
+                                    if c_idx == 1 and isinstance(val, (datetime.datetime, pd.Timestamp)):
+                                        cell.number_format = 'DD.MM.YYYY HH:mm:ss'
                                 elif c_idx == 4:
                                     cell.alignment = align_right
+                                    cell.number_format = '#,##0.00 "грн."'
                                 else:
                                     cell.alignment = align_left
                             current_row += 1
@@ -375,7 +405,16 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                                 dep_id = str(match_row['ID поповнення'])
                                 dep_desc = str(match_row.get('Опис поповнення', '') or '')
                                 cleared_amount = float(match_row.get('Сума компенсації', 0.0) or 0.0)
+                                full_dep_amount = float(match_row.get('Сума поповнення', 0.0) or 0.0)
                                 total_cleared += cleared_amount
+
+                                dep_dt = pd.to_datetime(dep_date) if not isinstance(dep_date, (pd.Timestamp, datetime.datetime)) else dep_date
+                                dep_date_str = dep_dt.strftime('%d.%m') if pd.notnull(dep_dt) else ""
+
+                                if abs(cleared_amount - full_dep_amount) < 1e-5:
+                                    detail_str = f"Повна компенсація: +{cleared_amount:g} грн на карту '{dep_desc}' від {dep_date_str} [ID: {dep_id}]"
+                                else:
+                                    detail_str = f"Часткова компенсація: +{cleared_amount:g} грн із транзакції на +{full_dep_amount:g} грн на карту '{dep_desc}' від {dep_date_str} [ID: {dep_id}]"
 
                                 child_vals = [
                                     dep_date,
@@ -384,7 +423,7 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                                     None,
                                     cleared_amount,
                                     None,
-                                    "Співпадіння готівки (Cash Match)"
+                                    detail_str
                                 ]
                                 sheet.row_dimensions[current_row].height = 20
                                 for c_idx, val in enumerate(child_vals, 1):
@@ -394,8 +433,11 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                                     cell.border = header_border
                                     if c_idx in (1, 2):
                                         cell.alignment = align_center
+                                        if c_idx == 1 and isinstance(val, (datetime.datetime, pd.Timestamp)):
+                                            cell.number_format = 'DD.MM.YYYY HH:mm:ss'
                                     elif c_idx == 5:
                                         cell.alignment = align_right
+                                        cell.number_format = '#,##0.00 "грн."'
                                     else:
                                         cell.alignment = align_left
                                 current_row += 1
@@ -409,7 +451,7 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                                 None,
                                 None,
                                 net_expense,
-                                "Списано на витрати леджера"
+                                "Списано на витрати леджера (чиста готівка)"
                             ]
                             sheet.row_dimensions[current_row].height = 22
                             for c_idx, val in enumerate(summary_vals, 1):
@@ -419,6 +461,7 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                                 cell.border = header_border
                                 if c_idx == 6:
                                     cell.alignment = align_right
+                                    cell.number_format = '#,##0.00 "грн."'
                                 else:
                                     cell.alignment = align_left
                             current_row += 1
@@ -426,27 +469,32 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                             # --- BLANK SEPARATOR ROW ---
                             sheet.row_dimensions[current_row].height = 12
                             for c_idx in range(1, 8):
-                                cell = sheet.cell(row=current_row, column=c_idx, value=None)
+                                sheet.cell(row=current_row, column=c_idx, value=None)
                             current_row += 1
 
-                    # б) Блоки Twins
-                    if not df_twins.empty:
-                        for _, t_row in df_twins.iterrows():
+                        elif event['type'] == 'twins':
+                            t_row = event['data']
                             t_date = t_row['Дата зняття']
-                            t_id = str(t_row['ID зняття'])
+                            t_id_src = str(t_row['ID зняття'])
                             t_desc_src = str(t_row.get('Опис зняття', '') or '')
+                            t_id_dst = str(t_row['ID поповнення'])
                             t_desc_dst = str(t_row.get('Опис поповнення', '') or '')
                             t_amount = float(t_row.get('Сума зняття', 0.0) or 0.0)
                             t_cleared = float(t_row.get('Сума компенсації', 0.0) or 0.0)
 
+                            dep_dt = pd.to_datetime(t_row['Дата поповнення']) if not isinstance(t_row['Дата поповнення'], (pd.Timestamp, datetime.datetime)) else t_row['Дата поповнення']
+                            dep_date_str = dep_dt.strftime('%d.%m') if pd.notnull(dep_dt) else ""
+
+                            twins_detail_str = f"Внутрішній переказ Twins: елімінація зустрічних транзакцій між '{t_desc_src}' ➔ '{t_desc_dst}' від {dep_date_str} [ID: {t_id_src} ➔ {t_id_dst}]"
+
                             twins_vals = [
                                 t_date,
-                                t_id,
+                                t_id_src,
                                 f"Переказ {t_desc_src} ➔ {t_desc_dst}",
                                 t_amount,
                                 t_cleared,
                                 0.00,
-                                "Внутрішній переказ Twins"
+                                twins_detail_str
                             ]
                             sheet.row_dimensions[current_row].height = 22
                             for c_idx, val in enumerate(twins_vals, 1):
@@ -456,8 +504,11 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                                 cell.border = header_border
                                 if c_idx in (1, 2):
                                     cell.alignment = align_center
+                                    if c_idx == 1 and isinstance(val, (datetime.datetime, pd.Timestamp)):
+                                        cell.number_format = 'DD.MM.YYYY HH:mm:ss'
                                 elif c_idx in (4, 5, 6):
                                     cell.alignment = align_right
+                                    cell.number_format = '#,##0.00 "грн."'
                                 else:
                                     cell.alignment = align_left
                             current_row += 1
@@ -465,7 +516,7 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                             # BLANK SEPARATOR ROW
                             sheet.row_dimensions[current_row].height = 12
                             for c_idx in range(1, 8):
-                                cell = sheet.cell(row=current_row, column=c_idx, value=None)
+                                sheet.cell(row=current_row, column=c_idx, value=None)
                             current_row += 1
 
                     sheet.freeze_panes = "A2"
