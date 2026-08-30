@@ -21,17 +21,17 @@ class ReconciliationRegistry:
     @classmethod
     def register(cls, date_left, id_left, desc_left, amount_left, date_right, id_right, desc_right, amount_right, cleared_amount, remaining_left, clear_type):
         cls._records.append({
-            'Дата відправки/зняття': date_left,
-            'ID джерела': id_left,
-            'Опис джерела': desc_left,
-            'Сума джерела': amount_left,
+            'Дата зняття': date_left,
+            'ID зняття': id_left,
+            'Опис зняття': desc_left,
+            'Сума зняття': amount_left,
             'Зв\'язок': '➔ ➔ ➔',
-            'Дата отримання/поповнення': date_right,
-            'ID отримувача': id_right,
-            'Опис отримувача': desc_right,
-            'Сума отримувача': amount_right,
+            'Дата поповнення': date_right,
+            'ID поповнення': id_right,
+            'Опис поповнення': desc_right,
+            'Сума поповнення': amount_right,
             'Сума компенсації': cleared_amount,
-            'Залишок джерела': remaining_left,
+            'Залишок зняття': remaining_left,
             'Тип компенсації': clear_type
         })
         
@@ -39,13 +39,13 @@ class ReconciliationRegistry:
     def get_df(cls):
         if not cls._records:
             return pd.DataFrame(columns=[
-                'Дата відправки/зняття', 'ID джерела', 'Опис джерела', 'Сума джерела',
-                'Зв\'язок', 'Дата отримання/поповнення', 'ID отримувача', 'Опис отримувача',
-                'Сума отримувача', 'Сума компенсації', 'Залишок джерела', 'Тип компенсації'
+                'Дата зняття', 'ID зняття', 'Опис зняття', 'Сума зняття',
+                'Зв\'язок', 'Дата поповнення', 'ID поповнення', 'Опис поповнення',
+                'Сума поповнення', 'Сума компенсації', 'Залишок зняття', 'Тип компенсації'
             ])
         df = pd.DataFrame(cls._records)
-        df['Дата відправки/зняття'] = pd.to_datetime(df['Дата відправки/зняття'])
-        return df.sort_values(by='Дата відправки/зняття', ascending=False).reset_index(drop=True)
+        df['Дата зняття'] = pd.to_datetime(df['Дата зняття'])
+        return df.sort_values(by='Дата зняття', ascending=False).reset_index(drop=True)
 
 def make_short_id_vectorized(df: pd.DataFrame) -> pd.Series:
     """Генерація унікальних ID для транзакцій."""
@@ -502,9 +502,12 @@ def detect_internal_transfers(df: pd.DataFrame) -> pd.DataFrame:
 
 def process_cash_clearing(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Математичне ядро компенсації готівки з 10-денним часовим буфером наступного місяця.
-    Повертає НОВИЙ аналітичний DataFrame з розщепленими (сплітованими) рядками.
-    Вхідний DataFrame (df) залишається незмінним.
+    Математичне ядро компенсації готівки за правилом "Локального пріоритету":
+    1. Спочатку зводяться готівкові зняття та поповнення строго FIFO всередині кожного календарного місяця окремо.
+    2. Лише якщо після місячного зведення у місяці M+1 залишилися невикористані поповнення (до 10 числа включно),
+       вони використовуються для компенсації залишків зняття з попереднього місяця M.
+    Повертає новий аналітичний DataFrame (df_analytical) зі розщепленими рядками.
+    Вхідний DataFrame (df) залишається 100% незмінним.
     """
     if df is None or df.empty:
         return df
@@ -512,7 +515,7 @@ def process_cash_clearing(df: pd.DataFrame) -> pd.DataFrame:
     if COL_DATE not in df.columns or COL_CAT not in df.columns or COL_AMOUNT not in df.columns:
         return df
 
-    # 1. Відокремлення трьох груп транзакцій (зберігаючи оригінальний df незмінним)
+    # 1. Відокремлення 3-х груп транзакцій
     mask_withdrawals = (df[COL_CAT] == 'зняття готівки') & (df[COL_AMOUNT] < 0)
     mask_deposits = (df[COL_CAT] == 'поповнення готівкою') & (df[COL_AMOUNT] > 0)
 
@@ -542,6 +545,9 @@ def process_cash_clearing(df: pd.DataFrame) -> pd.DataFrame:
             'id': dep_id,
             'date': dep_date,
             'date_str': dep_date.strftime('%Y-%m-%d %H:%M:%S') if hasattr(dep_date, 'strftime') else str(dep_date),
+            'year': dep_date.year,
+            'month': dep_date.month,
+            'day': dep_date.day,
             'initial_amount': dep_amount,
             'remaining_amount': dep_amount,
             'orig_row': row.copy(),
@@ -561,81 +567,122 @@ def process_cash_clearing(df: pd.DataFrame) -> pd.DataFrame:
             'id': w_id,
             'date': w_date,
             'date_str': w_date.strftime('%Y-%m-%d %H:%M:%S') if hasattr(w_date, 'strftime') else str(w_date),
+            'year': w_date.year,
+            'month': w_date.month,
             'initial_amount_abs': w_amount_abs,
             'remaining_amount_abs': w_amount_abs,
             'orig_row': row.copy(),
             'splits': []
         }
 
-    # 3. Групування зняття за роком та місяцем
-    withdrawals_df['naive_date'] = withdrawals_df[COL_DATE].apply(to_naive)
-    withdrawals_df['w_year'] = withdrawals_df['naive_date'].dt.year
-    withdrawals_df['w_month'] = withdrawals_df['naive_date'].dt.month
+    # Отримуємо всі унікальні хронологічні місяці
+    all_months = sorted(list(set(
+        [(w['year'], w['month']) for w in withdrawal_tracker.values()] +
+        [(d['year'], d['month']) for d in deposit_tracker.values()]
+    )))
 
-    grouped_withdrawals = withdrawals_df.groupby(['w_year', 'w_month'], sort=True)
+    # --- ЕТАП 1: Внутрішньомісячна FIFO-компенсація (Локальний пріоритет) ---
+    for yr, mn in all_months:
+        month_w_indices = [idx for idx, w in withdrawal_tracker.items() if w['year'] == yr and w['month'] == mn]
+        month_d_indices = [idx for idx, d in deposit_tracker.items() if d['year'] == yr and d['month'] == mn]
 
-    # 4. FIFO-компенсація за рахунок депозитів у визначеному часовому вікні
-    for (yr, mn), group in grouped_withdrawals:
-        window_start = pd.Timestamp(year=yr, month=mn, day=1, hour=0, minute=0, second=0)
-        if mn == 12:
-            next_yr = yr + 1
-            next_mn = 1
-        else:
-            next_yr = yr
-            next_mn = mn + 1
-        window_end = pd.Timestamp(year=next_yr, month=next_mn, day=10, hour=23, minute=59, second=59)
-
-        for w_idx, _ in group.iterrows():
+        for w_idx in month_w_indices:
             w_info = withdrawal_tracker[w_idx]
-            w_id = w_info['id']
-            w_date_str = w_info['date_str']
+            if w_info['remaining_amount_abs'] <= 0:
+                continue
 
-            if w_info['remaining_amount_abs'] > 0:
-                for d_idx, dep_info in deposit_tracker.items():
-                    if w_info['remaining_amount_abs'] <= 0:
-                        break
+            for d_idx in month_d_indices:
+                if w_info['remaining_amount_abs'] <= 0:
+                    break
 
-                    dep_date = dep_info['date']
-                    if window_start <= dep_date <= window_end and dep_info['remaining_amount'] > 0:
-                        cleared_amount = round(min(w_info['remaining_amount_abs'], dep_info['remaining_amount']), 2)
-                        if cleared_amount > 0:
-                            dep_info['remaining_amount'] = round(dep_info['remaining_amount'] - cleared_amount, 2)
-                            w_info['remaining_amount_abs'] = round(w_info['remaining_amount_abs'] - cleared_amount, 2)
+                dep_info = deposit_tracker[d_idx]
+                if dep_info['remaining_amount'] > 0:
+                    cleared_amount = round(min(w_info['remaining_amount_abs'], dep_info['remaining_amount']), 2)
+                    if cleared_amount > 0:
+                        dep_info['remaining_amount'] = round(dep_info['remaining_amount'] - cleared_amount, 2)
+                        w_info['remaining_amount_abs'] = round(w_info['remaining_amount_abs'] - cleared_amount, 2)
 
-                            dep_id = dep_info['id']
+                        w_info['splits'].append({
+                            'dep_id': dep_info['id'],
+                            'amount': cleared_amount
+                        })
+                        dep_info['splits'].append({
+                            'with_id': w_info['id'],
+                            'amount': cleared_amount
+                        })
 
-                            w_info['splits'].append({
-                                'dep_id': dep_id,
-                                'amount': cleared_amount
-                            })
-                            dep_info['splits'].append({
-                                'with_id': w_id,
-                                'amount': cleared_amount
-                            })
+                        ReconciliationRegistry.register(
+                            date_left=w_info['orig_row'][COL_DATE],
+                            id_left=w_info['id'],
+                            desc_left=w_info['orig_row'].get(COL_DESC, ''),
+                            amount_left=w_info['orig_row'].get(COL_AMOUNT, 0.0),
+                            date_right=dep_info['orig_row'][COL_DATE],
+                            id_right=dep_info['id'],
+                            desc_right=dep_info['orig_row'].get(COL_DESC, ''),
+                            amount_right=dep_info['orig_row'].get(COL_AMOUNT, 0.0),
+                            cleared_amount=cleared_amount,
+                            remaining_left=w_info['remaining_amount_abs'],
+                            clear_type='Cash Clearing (Готівка)'
+                        )
 
-                            dep_row = dep_info['orig_row']
-                            w_row = w_info['orig_row']
+                        logger.info(
+                            f"CASH MATCH (Intra-month): Withdrawal {w_info['id']} ({w_info['date_str']}) matched with Deposit {dep_info['id']} ({dep_info['date_str']}) "
+                            f"for {cleared_amount:.2f} грн. Remaining w: {w_info['remaining_amount_abs']:.2f} грн."
+                        )
 
-                            ReconciliationRegistry.register(
-                                date_left=w_row[COL_DATE],
-                                id_left=w_id,
-                                desc_left=w_row.get(COL_DESC, ''),
-                                amount_left=w_row.get(COL_AMOUNT, 0.0),
-                                date_right=dep_row[COL_DATE],
-                                id_right=dep_id,
-                                desc_right=dep_row.get(COL_DESC, ''),
-                                amount_right=dep_row.get(COL_AMOUNT, 0.0),
-                                cleared_amount=cleared_amount,
-                                remaining_left=w_info['remaining_amount_abs'],
-                                clear_type='Cash Clearing (Готівка)'
-                            )
+    # --- ЕТАП 2: Міжмісячна компенсація з 10-денним буфером (Month M ➔ Month M+1 до 10 числа) ---
+    for yr, mn in all_months:
+        next_yr = yr + 1 if mn == 12 else yr
+        next_mn = 1 if mn == 12 else mn + 1
 
-                            logger.info(
-                                f"CASH MATCH: Withdrawal {w_id} ({w_date_str}) matched with Deposit {dep_id} ({dep_info['date_str']}) "
-                                f"for {cleared_amount:.2f} грн. Remaining w: {w_info['remaining_amount_abs']:.2f} грн."
-                            )
+        rem_w_indices = [idx for idx, w in withdrawal_tracker.items() if w['year'] == yr and w['month'] == mn and w['remaining_amount_abs'] > 0]
+        buffer_d_indices = [idx for idx, d in deposit_tracker.items() if d['year'] == next_yr and d['month'] == next_mn and d['day'] <= 10 and d['remaining_amount'] > 0]
 
-    # 5. Генерація нових аналітичних рядків
+        for w_idx in rem_w_indices:
+            w_info = withdrawal_tracker[w_idx]
+            if w_info['remaining_amount_abs'] <= 0:
+                continue
+
+            for d_idx in buffer_d_indices:
+                if w_info['remaining_amount_abs'] <= 0:
+                    break
+
+                dep_info = deposit_tracker[d_idx]
+                if dep_info['remaining_amount'] > 0:
+                    cleared_amount = round(min(w_info['remaining_amount_abs'], dep_info['remaining_amount']), 2)
+                    if cleared_amount > 0:
+                        dep_info['remaining_amount'] = round(dep_info['remaining_amount'] - cleared_amount, 2)
+                        w_info['remaining_amount_abs'] = round(w_info['remaining_amount_abs'] - cleared_amount, 2)
+
+                        w_info['splits'].append({
+                            'dep_id': dep_info['id'],
+                            'amount': cleared_amount
+                        })
+                        dep_info['splits'].append({
+                            'with_id': w_info['id'],
+                            'amount': cleared_amount
+                        })
+
+                        ReconciliationRegistry.register(
+                            date_left=w_info['orig_row'][COL_DATE],
+                            id_left=w_info['id'],
+                            desc_left=w_info['orig_row'].get(COL_DESC, ''),
+                            amount_left=w_info['orig_row'].get(COL_AMOUNT, 0.0),
+                            date_right=dep_info['orig_row'][COL_DATE],
+                            id_right=dep_info['id'],
+                            desc_right=dep_info['orig_row'].get(COL_DESC, ''),
+                            amount_right=dep_info['orig_row'].get(COL_AMOUNT, 0.0),
+                            cleared_amount=cleared_amount,
+                            remaining_left=w_info['remaining_amount_abs'],
+                            clear_type='Cash Clearing (Готівка)'
+                        )
+
+                        logger.info(
+                            f"CASH MATCH (Cross-month Buffer): Withdrawal {w_info['id']} ({w_info['date_str']}) matched with Deposit {dep_info['id']} ({dep_info['date_str']}) "
+                            f"for {cleared_amount:.2f} грн. Remaining w: {w_info['remaining_amount_abs']:.2f} грн."
+                        )
+
+    # 3. Генерація нових аналітичних рядків
     new_rows = []
 
     # а) Зняття готівки (Withdrawals)
@@ -684,7 +731,7 @@ def process_cash_clearing(df: pd.DataFrame) -> pd.DataFrame:
             row_rem[COL_ID] = orig_id
             new_rows.append(row_rem)
 
-    # 6. Об'єднання в один аналітичний DataFrame
+    # 4. Об'єднання та сортування
     new_rows_df = pd.DataFrame(new_rows)
 
     if not new_rows_df.empty:

@@ -176,14 +176,11 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
             df_analytical = detect_internal_transfers(df.copy())
             df_analytical = process_cash_clearing(df_analytical)
 
-        # 3. Аудиторський DataFrame
-        df_audit = ReconciliationRegistry.get_df()
-
-        # 4. Дашборд
+        # 3. Дашборд
         if df_dash is None or df_dash.empty:
             df_dash = generate_daily_dashboard(df_analytical)
 
-        # 5. Підготовка експорту для вкладок Income та Expenses
+        # 4. Підготовка експорту для вкладок Income та Expenses
         df_analytical_processed = expand_commission_splits_for_reports(df_analytical)
         df_analytical_export = df_analytical_processed.copy()
         df_analytical_export.insert(0, '№ п/п', range(1, len(df_analytical_export) + 1))
@@ -196,12 +193,18 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
         df_income = df_income.drop(columns=cols_to_drop_analysis, errors='ignore')
         df_expenses = df_expenses.drop(columns=cols_to_drop_analysis, errors='ignore')
 
+        # Заготовка порожньої структури для Reconciliation_Audit
+        df_audit_header = pd.DataFrame(columns=[
+            'Дата', 'Операція / ID', 'Картка / Опис',
+            'Оригінальна сума', 'Скомпенсовано', 'Залишок (Витрати)', 'Деталі звірки'
+        ])
+
         # Запис п'яти листів у суворо визначеному порядку:
         # 1. Total_Ledger, 2. Income, 3. Reconciliation_Audit, 4. Expenses, 5. Daily_Dashboard
         with pd.ExcelWriter(OUTPUT_FILE, engine='openpyxl', datetime_format='dd.mm.yyyy hh:mm:ss') as writer:
             df_export.to_excel(writer, index=False, sheet_name='Total_Ledger')
             df_income.to_excel(writer, index=False, sheet_name='Income')
-            df_audit.to_excel(writer, index=False, sheet_name='Reconciliation_Audit')
+            df_audit_header.to_excel(writer, index=False, sheet_name='Reconciliation_Audit')
             df_expenses.to_excel(writer, index=False, sheet_name='Expenses')
             df_dash.to_excel(writer, index=False, sheet_name='Daily_Dashboard')
 
@@ -289,44 +292,181 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                     sheet.auto_filter.ref = sheet.dimensions
 
                 elif sheet_name == 'Reconciliation_Audit':
+                    # --- Побудова деревоподібного листа звірки (Parent-Child Blocks) ---
                     sheet.row_dimensions[1].height = 30
-                    header_fill = PatternFill(start_color="5A5A5A", end_color="5A5A5A", fill_type="solid")
-                    header_font = Font(bold=True, color="FFFFFF", size=11)
+                    header_fill_audit = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+                    header_font_audit = Font(bold=True, color="FFFFFF", size=11)
                     header_alignment = Alignment(horizontal="center", vertical="center")
                     thin_grid_side = Side(style='thin', color="A6A6A6")
                     header_border = Border(left=thin_grid_side, right=thin_grid_side, top=thin_grid_side, bottom=thin_grid_side)
 
                     for cell in sheet[1]:
-                        if cell.value is not None:
-                            cell.font = header_font
-                            cell.fill = header_fill
-                            cell.alignment = header_alignment
-                            cell.border = header_border
+                        cell.font = header_font_audit
+                        cell.fill = header_fill_audit
+                        cell.alignment = header_alignment
+                        cell.border = header_border
 
-                    lavender_fill = PatternFill(start_color="E6E6FA", end_color="E6E6FA", fill_type="solid")
-                    green_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+                    # Стилі блоків
+                    parent_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+                    parent_font = Font(bold=True, size=11, color="000000")
 
-                    type_col_idx = None
-                    for c_idx in range(1, sheet.max_column + 1):
-                        col_val = str(sheet.cell(row=1, column=c_idx).value or '').strip()
-                        if col_val == 'Тип компенсації':
-                            type_col_idx = c_idx
-                            break
+                    child_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+                    child_font = Font(size=11, color="000000")
 
-                    for row_idx in range(2, sheet.max_row + 1):
-                        clear_type = str(sheet.cell(row=row_idx, column=type_col_idx).value or '') if type_col_idx else ''
-                        row_fill = None
-                        if 'Twins' in clear_type:
-                            row_fill = lavender_fill
-                        elif 'Cash Clearing' in clear_type or 'Готівка' in clear_type:
-                            row_fill = green_fill
+                    summary_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+                    summary_font = Font(bold=True, size=11, color="000000")
 
-                        for col_idx in range(1, sheet.max_column + 1):
-                            cell = sheet.cell(row=row_idx, column=col_idx)
-                            cell.border = Border(left=thin_grid_side, right=thin_grid_side, top=thin_grid_side, bottom=thin_grid_side)
-                            if row_fill:
-                                cell.fill = row_fill
-                            cell.alignment = Alignment(vertical="center")
+                    twins_fill = PatternFill(start_color="E6E6FA", end_color="E6E6FA", fill_type="solid")
+                    twins_font = Font(size=11, color="000000")
+
+                    align_center = Alignment(horizontal="center", vertical="center")
+                    align_left = Alignment(horizontal="left", vertical="center")
+                    align_right = Alignment(horizontal="right", vertical="center")
+
+                    df_audit_data = ReconciliationRegistry.get_df()
+
+                    if not df_audit_data.empty and 'Тип компенсації' in df_audit_data.columns:
+                        df_cash = df_audit_data[df_audit_data['Тип компенсації'].str.contains('Cash Clearing|Готівка', case=False, na=False)].copy()
+                        df_twins = df_audit_data[df_audit_data['Тип компенсації'].str.contains('Twins', case=False, na=False)].copy()
+                    else:
+                        df_cash = pd.DataFrame()
+                        df_twins = pd.DataFrame()
+
+                    current_row = 2
+
+                    # а) Блоки Cash Clearing (Parent-Child-Summary)
+                    if not df_cash.empty:
+                        grouped_cash = df_cash.groupby('ID зняття', sort=False)
+
+                        for w_id, group in grouped_cash:
+                            first_row = group.iloc[0]
+                            w_date = first_row['Дата зняття']
+                            w_desc = str(first_row.get('Опис зняття', '') or '')
+                            w_amount = float(first_row.get('Сума зняття', 0.0) or 0.0)
+
+                            # --- PARENT ROW ---
+                            parent_vals = [
+                                w_date,
+                                str(w_id),
+                                w_desc,
+                                w_amount,
+                                None,
+                                None,
+                                "Оригінальне зняття готівки"
+                            ]
+                            sheet.row_dimensions[current_row].height = 24
+                            for c_idx, val in enumerate(parent_vals, 1):
+                                cell = sheet.cell(row=current_row, column=c_idx, value=val)
+                                cell.font = parent_font
+                                cell.fill = parent_fill
+                                cell.border = header_border
+                                if c_idx in (1, 2):
+                                    cell.alignment = align_center
+                                elif c_idx == 4:
+                                    cell.alignment = align_right
+                                else:
+                                    cell.alignment = align_left
+                            current_row += 1
+
+                            # --- CHILD ROWS ---
+                            total_cleared = 0.0
+                            for _, match_row in group.iterrows():
+                                dep_date = match_row['Дата поповнення']
+                                dep_id = str(match_row['ID поповнення'])
+                                dep_desc = str(match_row.get('Опис поповнення', '') or '')
+                                cleared_amount = float(match_row.get('Сума компенсації', 0.0) or 0.0)
+                                total_cleared += cleared_amount
+
+                                child_vals = [
+                                    dep_date,
+                                    dep_id,
+                                    f"   ↳ Скомпенсовано на {dep_desc}",
+                                    None,
+                                    cleared_amount,
+                                    None,
+                                    "Співпадіння готівки (Cash Match)"
+                                ]
+                                sheet.row_dimensions[current_row].height = 20
+                                for c_idx, val in enumerate(child_vals, 1):
+                                    cell = sheet.cell(row=current_row, column=c_idx, value=val)
+                                    cell.font = child_font
+                                    cell.fill = child_fill
+                                    cell.border = header_border
+                                    if c_idx in (1, 2):
+                                        cell.alignment = align_center
+                                    elif c_idx == 5:
+                                        cell.alignment = align_right
+                                    else:
+                                        cell.alignment = align_left
+                                current_row += 1
+
+                            # --- SUMMARY ROW ---
+                            net_expense = round(w_amount + total_cleared, 2)
+                            summary_vals = [
+                                None,
+                                None,
+                                "[!] РЕАЛЬНІ ВИТРАТИ ГОТІВКИ (ЧИСТИЙ КЕШ)",
+                                None,
+                                None,
+                                net_expense,
+                                "Списано на витрати леджера"
+                            ]
+                            sheet.row_dimensions[current_row].height = 22
+                            for c_idx, val in enumerate(summary_vals, 1):
+                                cell = sheet.cell(row=current_row, column=c_idx, value=val)
+                                cell.font = summary_font
+                                cell.fill = summary_fill
+                                cell.border = header_border
+                                if c_idx == 6:
+                                    cell.alignment = align_right
+                                else:
+                                    cell.alignment = align_left
+                            current_row += 1
+
+                            # --- BLANK SEPARATOR ROW ---
+                            sheet.row_dimensions[current_row].height = 12
+                            for c_idx in range(1, 8):
+                                cell = sheet.cell(row=current_row, column=c_idx, value=None)
+                            current_row += 1
+
+                    # б) Блоки Twins
+                    if not df_twins.empty:
+                        for _, t_row in df_twins.iterrows():
+                            t_date = t_row['Дата зняття']
+                            t_id = str(t_row['ID зняття'])
+                            t_desc_src = str(t_row.get('Опис зняття', '') or '')
+                            t_desc_dst = str(t_row.get('Опис поповнення', '') or '')
+                            t_amount = float(t_row.get('Сума зняття', 0.0) or 0.0)
+                            t_cleared = float(t_row.get('Сума компенсації', 0.0) or 0.0)
+
+                            twins_vals = [
+                                t_date,
+                                t_id,
+                                f"Переказ {t_desc_src} ➔ {t_desc_dst}",
+                                t_amount,
+                                t_cleared,
+                                0.00,
+                                "Внутрішній переказ Twins"
+                            ]
+                            sheet.row_dimensions[current_row].height = 22
+                            for c_idx, val in enumerate(twins_vals, 1):
+                                cell = sheet.cell(row=current_row, column=c_idx, value=val)
+                                cell.font = twins_font
+                                cell.fill = twins_fill
+                                cell.border = header_border
+                                if c_idx in (1, 2):
+                                    cell.alignment = align_center
+                                elif c_idx in (4, 5, 6):
+                                    cell.alignment = align_right
+                                else:
+                                    cell.alignment = align_left
+                            current_row += 1
+
+                            # BLANK SEPARATOR ROW
+                            sheet.row_dimensions[current_row].height = 12
+                            for c_idx in range(1, 8):
+                                cell = sheet.cell(row=current_row, column=c_idx, value=None)
+                            current_row += 1
 
                     sheet.freeze_panes = "A2"
                     if sheet.max_row >= 1 and sheet.max_column >= 1:
@@ -439,9 +579,10 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                     col_letter = get_column_letter(col[0].column)
                     header_cell = col[0]
                     header_val = header_cell.value
+                    col_idx = col[0].column
                     
-                    if header_val == 'Опис операції' or header_val == COL_DESC:
-                        sheet.column_dimensions[col_letter].width = 20
+                    if sheet_name != 'Daily_Dashboard' and (header_val in ('Опис операції', COL_DESC, 'Картка / Опис') or col_idx == 3):
+                        sheet.column_dimensions[col_letter].width = 40
                     else:
                         import datetime
                         max_len = 0
@@ -449,10 +590,12 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                             if cell.value is not None:
                                 val = cell.value
                                 if isinstance(val, (int, float)):
-                                    is_fin = header_val in (
-                                        'Сума', COL_AMOUNT, 'Залишок', COL_BALANCE, 'План', 'Витрати', 
-                                        'Дохід', 'Різниця за день', 'Різниця за місяць', 'Різниця загалом',
-                                        'Сума джерела', 'Сума отримувача', 'Сума компенсації', 'Залишок джерела'
+                                    is_fin = (
+                                        header_val in (
+                                            'Сума', COL_AMOUNT, 'Залишок', COL_BALANCE, 'План', 'Витрати', 
+                                            'Дохід', 'Різниця за день', 'Різниця за місяць', 'Різниця загалом',
+                                            'Оригінальна сума', 'Скомпенсовано', 'Залишок (Витрати)'
+                                        ) or (sheet_name == 'Reconciliation_Audit' and col_idx in (4, 5, 6))
                                     )
                                     val_str = f"{val:,.2f}" if is_fin else f"{int(val)}" if val == int(val) else str(val)
                                 elif isinstance(val, (datetime.datetime, pd.Timestamp)):
@@ -464,16 +607,16 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                                 
                                 if len(val_str) > max_len:
                                     max_len = len(val_str)
-                        sheet.column_dimensions[col_letter].width = max_len + 4
+                        sheet.column_dimensions[col_letter].width = max(max_len + 4, 12)
 
                     # Налаштування форматів чисел
                     start_r = 2
                     for row_idx in range(start_r, sheet.max_row + 1):
                         cell = sheet.cell(row=row_idx, column=col[0].column)
-                        if header_val in (COL_DATE, 'Дата'):
-                            cell.number_format = 'DD.MM.YYYY HH:mm:ss' if header_val == COL_DATE else 'DD.MM.YYYY'
-                        elif header_val == COL_AMOUNT:
-                            cell.number_format = '[Color 10]#,##0.00;-#,##0.00;0.00'
+                        if header_val in (COL_DATE, 'Дата', 'Дата зняття', 'Дата поповнення', 'Дата відправки/зняття', 'Дата отримання/поповнення'):
+                            cell.number_format = 'DD.MM.YYYY HH:mm:ss' if header_val not in ('Дата') or sheet_name != 'Daily_Dashboard' else 'DD.MM.YYYY'
+                        elif header_val in (COL_AMOUNT, 'Сума зняття', 'Сума поповнення', 'Сума компенсації', 'Залишок зняття', 'Сума джерела', 'Сума отримувача', 'Залишок джерела'):
+                            cell.number_format = '#,##0.00' if header_val != COL_AMOUNT else '[Color 10]#,##0.00;-#,##0.00;0.00'
                         elif header_val == COL_BALANCE:
                             cell.number_format = '#,##0.00'
                         elif header_val in ('План', 'Витрати', 'Дохід'):
