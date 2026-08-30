@@ -369,17 +369,22 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                             w_date = first_row['Дата зняття']
                             w_id = str(first_row['ID зняття'])
                             w_desc = str(first_row.get('Опис зняття', '') or '')
+                            w_card = str(first_row.get('Картка джерела', '') or w_desc).strip()
                             w_amount = float(first_row.get('Сума зняття', 0.0) or 0.0)
 
+                            w_dt = pd.to_datetime(w_date) if not isinstance(w_date, (pd.Timestamp, datetime.datetime)) else w_date
+                            w_date_str = w_dt.strftime('%d.%m') if pd.notnull(w_dt) else ""
+
                             # --- PARENT ROW ---
+                            parent_desc = f"Зняття готівки в банкоматі ({w_card})" if w_card else "Зняття готівки в банкоматі"
                             parent_vals = [
                                 w_date,
                                 w_id,
-                                w_desc,
+                                parent_desc,
                                 w_amount,
                                 None,
                                 None,
-                                f"Оригінальне зняття готівки з '{w_desc}'"
+                                f"Оригінальне зняття готівки від {w_date_str}"
                             ]
                             sheet.row_dimensions[current_row].height = 24
                             for c_idx, val in enumerate(parent_vals, 1):
@@ -404,6 +409,7 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                                 dep_date = match_row['Дата поповнення']
                                 dep_id = str(match_row['ID поповнення'])
                                 dep_desc = str(match_row.get('Опис поповнення', '') or '')
+                                dep_card = str(match_row.get('Картка отримувача', '') or dep_desc).strip()
                                 cleared_amount = float(match_row.get('Сума компенсації', 0.0) or 0.0)
                                 full_dep_amount = float(match_row.get('Сума поповнення', 0.0) or 0.0)
                                 total_cleared += cleared_amount
@@ -412,14 +418,14 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                                 dep_date_str = dep_dt.strftime('%d.%m') if pd.notnull(dep_dt) else ""
 
                                 if abs(cleared_amount - full_dep_amount) < 1e-5:
-                                    detail_str = f"Повна компенсація: +{cleared_amount:g} грн на карту '{dep_desc}' від {dep_date_str} [ID: {dep_id}]"
+                                    detail_str = f"Повна компенсація: +{cleared_amount:g} грн від {dep_date_str}"
                                 else:
-                                    detail_str = f"Часткова компенсація: +{cleared_amount:g} грн із транзакції на +{full_dep_amount:g} грн на карту '{dep_desc}' від {dep_date_str} [ID: {dep_id}]"
+                                    detail_str = f"Часткова компенсація: +{cleared_amount:g} грн із транзакції на +{full_dep_amount:g} грн від {dep_date_str}"
 
                                 child_vals = [
                                     dep_date,
                                     dep_id,
-                                    f"   ↳ Скомпенсовано на {dep_desc}",
+                                    f"   ↳ Скомпенсовано на {dep_card}",
                                     None,
                                     cleared_amount,
                                     None,
@@ -477,20 +483,22 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                             t_date = t_row['Дата зняття']
                             t_id_src = str(t_row['ID зняття'])
                             t_desc_src = str(t_row.get('Опис зняття', '') or '')
+                            t_card_src = str(t_row.get('Картка джерела', '') or t_desc_src).strip()
                             t_id_dst = str(t_row['ID поповнення'])
                             t_desc_dst = str(t_row.get('Опис поповнення', '') or '')
+                            t_card_dst = str(t_row.get('Картка отримувача', '') or t_desc_dst).strip()
                             t_amount = float(t_row.get('Сума зняття', 0.0) or 0.0)
                             t_cleared = float(t_row.get('Сума компенсації', 0.0) or 0.0)
 
                             dep_dt = pd.to_datetime(t_row['Дата поповнення']) if not isinstance(t_row['Дата поповнення'], (pd.Timestamp, datetime.datetime)) else t_row['Дата поповнення']
                             dep_date_str = dep_dt.strftime('%d.%m') if pd.notnull(dep_dt) else ""
 
-                            twins_detail_str = f"Внутрішній переказ Twins: елімінація зустрічних транзакцій між '{t_desc_src}' ➔ '{t_desc_dst}' від {dep_date_str} [ID: {t_id_src} ➔ {t_id_dst}]"
+                            twins_detail_str = f"Внутрішній переказ Twins: елімінація зустрічних транзакцій від {dep_date_str}"
 
                             twins_vals = [
                                 t_date,
                                 t_id_src,
-                                f"Переказ {t_desc_src} ➔ {t_desc_dst}",
+                                f"Переказ {t_card_src} ➔ {t_card_dst}",
                                 t_amount,
                                 t_cleared,
                                 0.00,

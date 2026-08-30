@@ -19,17 +19,19 @@ class ReconciliationRegistry:
         cls._records = []
         
     @classmethod
-    def register(cls, date_left, id_left, desc_left, amount_left, date_right, id_right, desc_right, amount_right, cleared_amount, remaining_left, clear_type):
+    def register(cls, date_left, id_left, desc_left, amount_left, date_right, id_right, desc_right, amount_right, cleared_amount, remaining_left, clear_type, card_left="", card_right=""):
         cls._records.append({
             'Дата зняття': date_left,
             'ID зняття': id_left,
             'Опис зняття': desc_left,
             'Сума зняття': amount_left,
+            'Картка джерела': card_left,
             'Зв\'язок': '➔ ➔ ➔',
             'Дата поповнення': date_right,
             'ID поповнення': id_right,
             'Опис поповнення': desc_right,
             'Сума поповнення': amount_right,
+            'Картка отримувача': card_right,
             'Сума компенсації': cleared_amount,
             'Залишок зняття': remaining_left,
             'Тип компенсації': clear_type
@@ -39,9 +41,9 @@ class ReconciliationRegistry:
     def get_df(cls):
         if not cls._records:
             return pd.DataFrame(columns=[
-                'Дата зняття', 'ID зняття', 'Опис зняття', 'Сума зняття',
-                'Зв\'язок', 'Дата поповнення', 'ID поповнення', 'Опис поповнення',
-                'Сума поповнення', 'Сума компенсації', 'Залишок зняття', 'Тип компенсації'
+                'Дата зняття', 'ID зняття', 'Опис зняття', 'Сума зняття', 'Картка джерела',
+                'Зв\'язок', 'Дата поповнення', 'ID поповнення', 'Опис поповнення', 'Сума поповнення', 'Картка отримувача',
+                'Сума компенсації', 'Залишок зняття', 'Тип компенсації'
             ])
         df = pd.DataFrame(cls._records)
         df['Дата зняття'] = pd.to_datetime(df['Дата зняття'])
@@ -422,7 +424,9 @@ def detect_internal_transfers(df: pd.DataFrame) -> pd.DataFrame:
             amount_right=row_in.get(COL_AMOUNT, 0.0),
             cleared_amount=abs(float(row_in.get(COL_AMOUNT, 0.0) or 0.0)),
             remaining_left=0.0,
-            clear_type='Twins (Картка ➔ Картка)'
+            clear_type='Twins (Картка ➔ Картка)',
+            card_left=row_out.get(COL_CARD, ''),
+            card_right=row_in.get(COL_CARD, '')
         )
 
         # Для витрати (neg)
@@ -622,7 +626,9 @@ def process_cash_clearing(df: pd.DataFrame) -> pd.DataFrame:
                             amount_right=dep_info['orig_row'].get(COL_AMOUNT, 0.0),
                             cleared_amount=cleared_amount,
                             remaining_left=w_info['remaining_amount_abs'],
-                            clear_type='Cash Clearing (Готівка)'
+                            clear_type='Cash Clearing (Готівка)',
+                            card_left=w_info['orig_row'].get(COL_CARD, ''),
+                            card_right=dep_info['orig_row'].get(COL_CARD, '')
                         )
 
                         logger.info(
@@ -674,7 +680,9 @@ def process_cash_clearing(df: pd.DataFrame) -> pd.DataFrame:
                             amount_right=dep_info['orig_row'].get(COL_AMOUNT, 0.0),
                             cleared_amount=cleared_amount,
                             remaining_left=w_info['remaining_amount_abs'],
-                            clear_type='Cash Clearing (Готівка)'
+                            clear_type='Cash Clearing (Готівка)',
+                            card_left=w_info['orig_row'].get(COL_CARD, ''),
+                            card_right=dep_info['orig_row'].get(COL_CARD, '')
                         )
 
                         logger.info(
