@@ -32,7 +32,8 @@ from src.finance_logic import (
     apply_bank_specific_post_processing,
     detect_internal_transfers,
     process_cash_clearing,
-    process_transit_vika
+    process_transit_vika,
+    process_mono_investments
 )
 from src.report_engine import save_final_ledger, generate_daily_dashboard
 
@@ -163,6 +164,9 @@ def main():
 
         # Маркування прихідних транзакцій від Віки
         df_final = process_transit_vika(df_final)
+
+        # Маркування інвестиційних витрат для картки Monobank
+        df_final = process_mono_investments(df_final)
 
         # Первинний незмінний реєстр транзакцій (для листа Total_Ledger)
         df_raw = df_final.copy()
