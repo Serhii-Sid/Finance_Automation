@@ -12,6 +12,7 @@ from src.finance_logic import (
     expand_commission_splits_for_reports,
     detect_internal_transfers,
     process_cash_clearing,
+    process_transit_vika,
     ReconciliationRegistry
 )
 
@@ -180,6 +181,7 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
         # 2. Формування df_analytical та збір аудиторського реєстру ReconciliationRegistry
         if df_analytical is None:
             df_analytical = detect_internal_transfers(df.copy())
+            df_analytical = process_transit_vika(df_analytical)
             df_analytical = process_cash_clearing(df_analytical)
 
         # 3. Дашборд

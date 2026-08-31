@@ -183,7 +183,7 @@ def detect_internal_transfers(df: pd.DataFrame) -> pd.DataFrame:
     desc_norm = _normalize_text(df[COL_DESC]) if COL_DESC in df.columns else pd.Series()
     if not desc_norm.empty:
         final_cat = df[COL_CAT].copy()
-        protected_cats = set(CATEGORIES_KEYWORDS.keys()) - {'переказ на власний рахунок', 'переказ з власного рахунку'}
+        protected_cats = (set(CATEGORIES_KEYWORDS.keys()) | {'транзит Віка'}) - {'переказ на власний рахунок', 'переказ з власного рахунку'}
         
         for cat, keywords in CATEGORIES_KEYWORDS.items():
             for kw in keywords:
@@ -870,6 +870,32 @@ def expand_commission_splits_for_reports(df: pd.DataFrame) -> pd.DataFrame:
     new_df = pd.DataFrame(new_rows)
     df_out = pd.concat([df_out, new_df], ignore_index=True)
     df_out = df_out.sort_values(by=COL_DATE, ascending=False).reset_index(drop=True)
+
+    return df_out
+
+
+def process_transit_vika(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Маркування прихідних транзакцій від Віки для картки Monobank.
+    Змінює категорію позитивних транзакцій з описом 'Від: Sidorska Viktoriia' на 'транзит Віка'.
+    """
+    if df is None or df.empty:
+        return df
+
+    df_out = df.copy()
+
+    for idx, row in df_out.iterrows():
+        amount = float(row.get(COL_AMOUNT, 0.0) or 0.0)
+        card_str = str(row.get(COL_CARD, '') or '')
+        desc = str(row.get(COL_DESC, '') or '')
+
+        # Умови:
+        # 1. Позитивна транзакція (Сума > 0)
+        # 2. Картка містить у назві 'Monobank' або хвіст '7854'
+        # 3. Опис операції містить "Від: Sidorska Viktoriia"
+        if amount > 0 and ('monobank' in card_str.lower() or '7854' in card_str):
+            if 'sidorska viktoriia' in desc.lower():
+                df_out.loc[idx, COL_CAT] = 'транзит Віка'
 
     return df_out
 
