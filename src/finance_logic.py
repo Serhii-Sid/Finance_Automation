@@ -925,3 +925,167 @@ def process_mono_investments(df: pd.DataFrame) -> pd.DataFrame:
 
     return df_out
 
+
+def process_investment_transit_clearing(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Динамічний FIFO-кліринг "Investment Transit Clearing" для картки Monobank Sid Чорна (7854).
+    Зіставляє прихідний транзит Віки ('транзит Віка') з P2P-витратами інвестицій ('інвестиції').
+    """
+    if df is None or df.empty:
+        return df
+
+    df_out = df.copy()
+
+    # Маска картки Monobank Sid Чорна (7854)
+    mono_mask = df_out[COL_CARD].astype(str).str.contains('Monobank Sid Чорна|7854', case=False, regex=True, na=False)
+
+    transit_mask = mono_mask & (df_out[COL_CAT] == 'транзит Віка') & (df_out[COL_AMOUNT] > 0)
+    invest_mask = mono_mask & (df_out[COL_CAT] == 'інвестиції') & (df_out[COL_AMOUNT] < 0)
+
+    if not transit_mask.any() or not invest_mask.any():
+        return df_out
+
+    others_df = df_out[~(transit_mask | invest_mask)].copy()
+
+    df_transit = df_out[transit_mask].copy()
+    df_invest = df_out[invest_mask].copy()
+
+    df_transit['naive_date'] = pd.to_datetime(df_transit[COL_DATE])
+    df_invest['naive_date'] = pd.to_datetime(df_invest[COL_DATE])
+
+    # Сортування від найстаріших до найновіших (для FIFO)
+    df_transit = df_transit.sort_values(by='naive_date', ascending=True)
+    df_invest = df_invest.sort_values(by='naive_date', ascending=True)
+
+    deposit_tracker = {}
+    for d_idx, row in df_transit.iterrows():
+        amount = float(row[COL_AMOUNT])
+        deposit_tracker[d_idx] = {
+            'id': str(row[COL_ID]),
+            'date': row[COL_DATE],
+            'amount': amount,
+            'remaining_amount': amount,
+            'splits': [],
+            'orig_row': row
+        }
+
+    expense_tracker = {}
+    for e_idx, row in df_invest.iterrows():
+        amount_abs = abs(float(row[COL_AMOUNT]))
+        expense_tracker[e_idx] = {
+            'id': str(row[COL_ID]),
+            'date': row[COL_DATE],
+            'amount_abs': amount_abs,
+            'remaining_amount_abs': amount_abs,
+            'splits': [],
+            'orig_row': row
+        }
+
+    # FIFO зіставляння: для кожної прихідної транзакції Віки компенсуємо витрати інвестицій хронологічно
+    for d_idx, d_info in deposit_tracker.items():
+        if d_info['remaining_amount'] <= 0:
+            continue
+
+        for e_idx, e_info in expense_tracker.items():
+            if d_info['remaining_amount'] <= 0:
+                break
+
+            if e_info['remaining_amount_abs'] > 0:
+                cleared_amount = round(min(d_info['remaining_amount'], e_info['remaining_amount_abs']), 2)
+                if cleared_amount > 0:
+                    d_info['remaining_amount'] = round(d_info['remaining_amount'] - cleared_amount, 2)
+                    e_info['remaining_amount_abs'] = round(e_info['remaining_amount_abs'] - cleared_amount, 2)
+
+                    e_info['splits'].append({
+                        'dep_id': d_info['id'],
+                        'amount': cleared_amount
+                    })
+                    d_info['splits'].append({
+                        'exp_id': e_info['id'],
+                        'amount': cleared_amount
+                    })
+
+                    ReconciliationRegistry.register(
+                        date_left=e_info['orig_row'][COL_DATE],
+                        id_left=e_info['id'],
+                        desc_left=e_info['orig_row'].get(COL_DESC, ''),
+                        amount_left=e_info['orig_row'].get(COL_AMOUNT, 0.0),
+                        date_right=d_info['orig_row'][COL_DATE],
+                        id_right=d_info['id'],
+                        desc_right=d_info['orig_row'].get(COL_DESC, ''),
+                        amount_right=d_info['orig_row'].get(COL_AMOUNT, 0.0),
+                        cleared_amount=cleared_amount,
+                        remaining_left=e_info['remaining_amount_abs'],
+                        clear_type='Investment Transit (Віка)',
+                        card_left=e_info['orig_row'].get(COL_CARD, ''),
+                        card_right=d_info['orig_row'].get(COL_CARD, '')
+                    )
+
+                    logger.info(
+                        f"INVESTMENT TRANSIT MATCH: Transit {d_info['id']} matched with Expense {e_info['id']} "
+                        f"for {cleared_amount:.2f} грн. Remaining transit: {d_info['remaining_amount']:.2f} грн."
+                    )
+
+    # 3. Формуємо нові аналітичні рядки
+    new_rows = []
+
+    # а) Витрати інвестицій
+    for e_idx, e_info in expense_tracker.items():
+        orig_row = e_info['orig_row']
+        orig_desc = str(orig_row.get(COL_DESC, '') or '')
+        orig_id = e_info['id']
+
+        for split in e_info['splits']:
+            row_split = orig_row.copy()
+            row_split[COL_AMOUNT] = -round(split['amount'], 2)
+            row_split[COL_CAT] = 'інвестиції (транзит Віка)'
+            row_split[COL_DESC] = f"[Транзит Віка - Компенсовано] {orig_desc}"
+            row_split[COL_ID] = f"{split['dep_id']}_clear_{orig_id}"
+            new_rows.append(row_split)
+
+        rem = round(e_info['remaining_amount_abs'], 2)
+        if rem > 0:
+            row_rem = orig_row.copy()
+            row_rem[COL_AMOUNT] = -rem
+            row_rem[COL_CAT] = 'інвестиції'
+            row_rem[COL_DESC] = orig_desc
+            row_rem[COL_ID] = orig_id
+            new_rows.append(row_rem)
+
+    # б) Депозити транзиту Віки
+    for d_idx, d_info in deposit_tracker.items():
+        orig_row = d_info['orig_row']
+        orig_desc = str(orig_row.get(COL_DESC, '') or '')
+        orig_id = d_info['id']
+
+        for split in d_info['splits']:
+            row_split = orig_row.copy()
+            row_split[COL_AMOUNT] = round(split['amount'], 2)
+            row_split[COL_CAT] = 'транзит Віка'
+            row_split[COL_DESC] = f"[Транзит Віка - Компенсовано] {orig_desc}"
+            row_split[COL_ID] = f"{orig_id}_clear_{split['exp_id']}"
+            new_rows.append(row_split)
+
+        rem = round(d_info['remaining_amount'], 2)
+        if rem > 0:
+            row_rem = orig_row.copy()
+            row_rem[COL_AMOUNT] = rem
+            row_rem[COL_CAT] = 'транзит Віка'
+            row_rem[COL_DESC] = orig_desc
+            row_rem[COL_ID] = orig_id
+            new_rows.append(row_rem)
+
+    # 4. Об'єднання та сортування
+    new_rows_df = pd.DataFrame(new_rows)
+
+    if not new_rows_df.empty and 'naive_date' in new_rows_df.columns:
+        new_rows_df = new_rows_df.drop(columns=['naive_date'])
+
+    if 'naive_date' in others_df.columns:
+        others_df = others_df.drop(columns=['naive_date'])
+
+    final_df = pd.concat([others_df, new_rows_df], ignore_index=True)
+    final_df = final_df.sort_values(by=COL_DATE, ascending=False).reset_index(drop=True)
+
+    return final_df
+
