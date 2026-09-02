@@ -5,7 +5,8 @@ import pandas as pd
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from config import (
-    OUTPUT_FOLDER, OUTPUT_FILE, COL_DATE, COL_AMOUNT, COL_BALANCE, COL_ID, COL_CAT, COL_CARD, COL_DESC
+    OUTPUT_FOLDER, OUTPUT_FILE, COL_DATE, COL_AMOUNT, COL_BALANCE, COL_ID, COL_CAT, COL_CARD, COL_DESC,
+    COL_CLEARING_STATUS, COL_MCC
 )
 import datetime
 from src.finance_logic import (
@@ -172,6 +173,7 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
 
         # 1. Сирий недоторканий DataFrame для листа 'Total_Ledger'
         df_export = df.copy()
+        df_export = df_export.drop(columns=[COL_CLEARING_STATUS], errors='ignore')
         df_export.insert(0, '№ п/п', range(1, len(df_export) + 1))
         
         ukr_months = {
@@ -204,6 +206,12 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
         cols_to_drop_analysis = ['№ п/п', 'Місяць']
         df_income = df_income.drop(columns=cols_to_drop_analysis, errors='ignore')
         df_expenses = df_expenses.drop(columns=cols_to_drop_analysis, errors='ignore')
+
+        desired_order = [COL_ID, COL_DATE, COL_CLEARING_STATUS, COL_CAT, COL_CARD, COL_DESC, COL_AMOUNT, COL_BALANCE, COL_MCC]
+        income_cols = [c for c in desired_order if c in df_income.columns] + [c for c in df_income.columns if c not in desired_order]
+        expenses_cols = [c for c in desired_order if c in df_expenses.columns] + [c for c in df_expenses.columns if c not in desired_order]
+        df_income = df_income[income_cols]
+        df_expenses = df_expenses[expenses_cols]
 
         # Заготовка порожньої структури для Reconciliation_Audit
         df_audit_header = pd.DataFrame(columns=[
@@ -762,39 +770,66 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                     sheet.auto_filter.ref = sheet.dimensions
 
                 # --- Налаштування ширини та форматів клітинок (для всіх вкладок) ---
+                # 1. Знаходимо стовпчик «Категорія» та вираховуємо max_category_width як ліміт для даного листа
+                category_col = None
+                for col in sheet.columns:
+                    header_val_str = str(col[0].value or '').strip()
+                    if header_val_str in ('Категорія', COL_CAT):
+                        category_col = col
+                        break
+
+                def _get_val_str(val, header_val, col_idx):
+                    if val is None or pd.isna(val):
+                        return ""
+                    if isinstance(val, (int, float)):
+                        import math
+                        if math.isnan(val):
+                            return ""
+                        is_fin = (
+                            header_val in (
+                                'Сума', COL_AMOUNT, 'Залишок', COL_BALANCE, 'План', 'Витрати', 
+                                'Дохід', 'Різниця за день', 'Різниця за місяць', 'Різниця загалом',
+                                'Оригінальна сума', 'Скомпенсовано', 'Залишок (Витрати)'
+                            ) or (sheet_name == 'Reconciliation_Audit' and col_idx in (4, 5, 6))
+                        )
+                        try:
+                            return f"{val:,.2f}" if is_fin else (f"{int(val)}" if val == int(val) else str(val))
+                        except Exception:
+                            return str(val)
+                    elif isinstance(val, (datetime.datetime, pd.Timestamp)):
+                        return val.strftime('%d.%m.%Y %H:%M:%S')
+                    elif isinstance(val, datetime.date):
+                        return val.strftime('%d.%m.%Y')
+                    else:
+                        return str(val)
+
+                if category_col is not None:
+                    cat_max_len = 0
+                    cat_header_val = str(category_col[0].value or '').strip()
+                    for cell in category_col:
+                        val_s = _get_val_str(cell.value, cat_header_val, category_col[0].column)
+                        if len(val_s) > cat_max_len:
+                            cat_max_len = len(val_s)
+                    max_category_width = max(cat_max_len + 4, 12)
+                else:
+                    max_category_width = 35
+
                 for col in sheet.columns:
                     col_letter = get_column_letter(col[0].column)
                     header_cell = col[0]
                     header_val = header_cell.value
                     col_idx = col[0].column
                     
-                    if sheet_name != 'Daily_Dashboard' and (header_val in ('Опис операції', COL_DESC, 'Картка / Опис') or col_idx == 3):
-                        sheet.column_dimensions[col_letter].width = 40
-                    else:
-                        import datetime
-                        max_len = 0
-                        for cell in col:
-                            if cell.value is not None:
-                                val = cell.value
-                                if isinstance(val, (int, float)):
-                                    is_fin = (
-                                        header_val in (
-                                            'Сума', COL_AMOUNT, 'Залишок', COL_BALANCE, 'План', 'Витрати', 
-                                            'Дохід', 'Різниця за день', 'Різниця за місяць', 'Різниця загалом',
-                                            'Оригінальна сума', 'Скомпенсовано', 'Залишок (Витрати)'
-                                        ) or (sheet_name == 'Reconciliation_Audit' and col_idx in (4, 5, 6))
-                                    )
-                                    val_str = f"{val:,.2f}" if is_fin else f"{int(val)}" if val == int(val) else str(val)
-                                elif isinstance(val, (datetime.datetime, pd.Timestamp)):
-                                    val_str = val.strftime('%d.%m.%Y %H:%M:%S')
-                                elif isinstance(val, datetime.date):
-                                    val_str = val.strftime('%d.%m.%Y')
-                                else:
-                                    val_str = str(val)
-                                
-                                if len(val_str) > max_len:
-                                    max_len = len(val_str)
-                        sheet.column_dimensions[col_letter].width = max(max_len + 4, 12)
+                    max_len = 0
+                    for cell in col:
+                        val_s = _get_val_str(cell.value, header_val, col_idx)
+                        if len(val_s) > max_len:
+                            max_len = len(val_s)
+                    
+                    dynamic_width = max_len + 4
+                    col_width = min(dynamic_width, max_category_width)
+                    col_width = max(col_width, 12)
+                    sheet.column_dimensions[col_letter].width = col_width
 
                     # Налаштування форматів чисел
                     start_r = 2

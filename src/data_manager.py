@@ -4,7 +4,7 @@ import pandas as pd
 from src.text_utils import _normalize_text, REGEX_CAT_CLEAN
 from src.finance_logic import classify_transfer, get_category_by_mcc, make_short_id_vectorized
 from config import (
-    COL_ID, COL_DATE, COL_CAT, COL_CARD, COL_DESC, COL_AMOUNT, COL_BALANCE, COL_MCC,
+    COL_ID, COL_DATE, COL_CAT, COL_CARD, COL_DESC, COL_AMOUNT, COL_BALANCE, COL_MCC, COL_CLEARING_STATUS,
     IBAN_TO_CARD_MAP, CARDS_DICTIONARY, USEFUL_COLUMNS,
     MCC_MAP, CATEGORIES_KEYWORDS, INCOME_CATEGORIES, EXPENSES_CATEGORIES, AMBIGUOUS_CATEGORIES
 )
@@ -65,10 +65,15 @@ def standardize_df(df: pd.DataFrame) -> pd.DataFrame:
     if COL_BALANCE not in df.columns:
         df[COL_BALANCE] = 0.0
 
+    if COL_CLEARING_STATUS not in df.columns:
+        df[COL_CLEARING_STATUS] = '-'
+    else:
+        df[COL_CLEARING_STATUS] = df[COL_CLEARING_STATUS].fillna('-').replace(['nan', 'None', '', '<NA>'], '-')
+
     # Гарантуємо наявність усіх цільових колонок, щоб уникнути KeyError
     for col in USEFUL_COLUMNS:
         if col not in df.columns:
-            df[col] = pd.NA
+            df[col] = '-' if col == COL_CLEARING_STATUS else pd.NA
     return df
 
 def clean_and_transform(df: pd.DataFrame) -> pd.DataFrame:

@@ -6,7 +6,8 @@ from typing import Optional
 from src.text_utils import _normalize_text
 from config import (
     CARDS_DICTIONARY, CATEGORIES_KEYWORDS, INCOME_CATEGORIES, AMBIGUOUS_CATEGORIES,
-    COL_DESC, COL_CAT, COL_AMOUNT, COL_CARD, COL_DATE, COL_BALANCE, COL_ID, MCC_MAP, EXPENSES_CATEGORIES
+    COL_DESC, COL_CAT, COL_AMOUNT, COL_CARD, COL_DATE, COL_BALANCE, COL_ID, MCC_MAP, EXPENSES_CATEGORIES,
+    COL_CLEARING_STATUS
 )
 
 logger = logging.getLogger(__name__)
@@ -264,6 +265,7 @@ def detect_internal_transfers(df: pd.DataFrame) -> pd.DataFrame:
             new_cat = 'переказ на власний рахунок' if amount < 0 else 'переказ з власного рахунку'
             
             validated_own_indices.add(idx)
+            df.loc[idx, COL_CLEARING_STATUS] = 'Внутрішній переказ'
             
             if df.loc[idx, COL_CAT] != new_cat:
                 df.loc[idx, COL_CAT] = new_cat
@@ -409,6 +411,8 @@ def detect_internal_transfers(df: pd.DataFrame) -> pd.DataFrame:
     for neg_idx, pos_idx in twin_indices:
         validated_own_indices.add(neg_idx)
         validated_own_indices.add(pos_idx)
+        df.loc[neg_idx, COL_CLEARING_STATUS] = 'Внутрішній переказ'
+        df.loc[pos_idx, COL_CLEARING_STATUS] = 'Внутрішній переказ'
 
         row_out = df.loc[neg_idx]
         row_in = df.loc[pos_idx]
@@ -430,28 +434,22 @@ def detect_internal_transfers(df: pd.DataFrame) -> pd.DataFrame:
         )
 
         # Для витрати (neg)
-        row_neg = df.loc[neg_idx]
-        current_cat_neg = row_neg.get(COL_CAT)
-        if pd.isna(current_cat_neg) or current_cat_neg in overwrite_cats:
-            if df.loc[neg_idx, COL_CAT] != 'переказ на власний рахунок':
-                df.loc[neg_idx, COL_CAT] = 'переказ на власний рахунок'
-                changed_twin += 1
-                logger.info(
-                    f"detect_internal_transfers (Етап 2: Близнюки витрата): idx={neg_idx}, "
-                    f"desc='{str(row_neg.get(COL_DESC, ''))[:60]}', amount={row_neg.get(COL_AMOUNT):.2f} → 'переказ на власний рахунок'"
-                )
+        if df.loc[neg_idx, COL_CAT] != 'переказ на власний рахунок':
+            df.loc[neg_idx, COL_CAT] = 'переказ на власний рахунок'
+            changed_twin += 1
+            logger.info(
+                f"detect_internal_transfers (Етап 2: Близнюки витрата): idx={neg_idx}, "
+                f"desc='{str(row_out.get(COL_DESC, ''))[:60]}', amount={row_out.get(COL_AMOUNT):.2f} → 'переказ на власний рахунок'"
+            )
 
         # Для доходу (pos)
-        row_pos = df.loc[pos_idx]
-        current_cat_pos = row_pos.get(COL_CAT)
-        if pd.isna(current_cat_pos) or current_cat_pos in overwrite_cats:
-            if df.loc[pos_idx, COL_CAT] != 'переказ з власного рахунку':
-                df.loc[pos_idx, COL_CAT] = 'переказ з власного рахунку'
-                changed_twin += 1
-                logger.info(
-                    f"detect_internal_transfers (Етап 2: Близнюки дохід): idx={pos_idx}, "
-                    f"desc='{str(row_pos.get(COL_DESC, ''))[:60]}', amount={row_pos.get(COL_AMOUNT):.2f} → 'переказ з власного рахунку'"
-                )
+        if df.loc[pos_idx, COL_CAT] != 'переказ з власного рахунку':
+            df.loc[pos_idx, COL_CAT] = 'переказ з власного рахунку'
+            changed_twin += 1
+            logger.info(
+                f"detect_internal_transfers (Етап 2: Близнюки дохід): idx={pos_idx}, "
+                f"desc='{str(row_in.get(COL_DESC, ''))[:60]}', amount={row_in.get(COL_AMOUNT):.2f} → 'переказ з власного рахунку'"
+            )
 
     # Етап 3 (Демоція непідтверджених власних переказів)
     own_transfer_cats = {
@@ -473,6 +471,7 @@ def detect_internal_transfers(df: pd.DataFrame) -> pd.DataFrame:
                 
                 new_cat = 'переказ на чужий рахунок' if amount < 0 else 'переказ з чужого рахунку'
                 df.loc[idx, COL_CAT] = new_cat
+                df.loc[idx, COL_CLEARING_STATUS] = '-'
                 demoted_count += 1
                 logger.info(
                     f"detect_internal_transfers (Демоція): idx={idx}, "
@@ -698,21 +697,37 @@ def process_cash_clearing(df: pd.DataFrame) -> pd.DataFrame:
         orig_row = w_info['orig_row']
         orig_desc = str(orig_row.get(COL_DESC, '') or '')
         orig_id = w_info['id']
+        try:
+            orig_amount = float(orig_row.get(COL_AMOUNT, 0.0) or 0.0)
+        except (ValueError, TypeError):
+            orig_amount = 0.0
+        orig_amount_str = f"{orig_amount:.2f}"
+
+        rem = round(w_info['remaining_amount_abs'], 2)
+        total_rows = len(w_info['splits']) + (1 if rem > 0 else 0)
+        is_split = total_rows > 1
 
         for split in w_info['splits']:
             row_split = orig_row.copy()
             row_split[COL_AMOUNT] = -round(split['amount'], 2)
             row_split[COL_CAT] = 'переказ на власний рахунок'
-            row_split[COL_DESC] = f"[Готівка-Компенсовано] {orig_desc}"
+            row_split[COL_CLEARING_STATUS] = 'Готівка-Компенсовано'
+            if is_split:
+                row_split[COL_DESC] = f"[Оригінал: {orig_amount_str}] [Готівка-Компенсовано] {orig_desc}"
+            else:
+                row_split[COL_DESC] = f"[Готівка-Компенсовано] {orig_desc}"
             row_split[COL_ID] = f"{orig_id}_clear_{split['dep_id']}"
             new_rows.append(row_split)
 
-        rem = round(w_info['remaining_amount_abs'], 2)
         if rem > 0:
             row_rem = orig_row.copy()
             row_rem[COL_AMOUNT] = -rem
             row_rem[COL_CAT] = 'зняття готівки'
-            row_rem[COL_DESC] = orig_desc
+            row_rem[COL_CLEARING_STATUS] = '-'
+            if is_split:
+                row_rem[COL_DESC] = f"[Оригінал: {orig_amount_str}] {orig_desc}"
+            else:
+                row_rem[COL_DESC] = orig_desc
             row_rem[COL_ID] = orig_id
             new_rows.append(row_rem)
 
@@ -721,21 +736,37 @@ def process_cash_clearing(df: pd.DataFrame) -> pd.DataFrame:
         orig_row = dep_info['orig_row']
         orig_desc = str(orig_row.get(COL_DESC, '') or '')
         orig_id = dep_info['id']
+        try:
+            orig_amount = float(orig_row.get(COL_AMOUNT, 0.0) or 0.0)
+        except (ValueError, TypeError):
+            orig_amount = 0.0
+        orig_amount_str = f"{orig_amount:.2f}"
+
+        rem = round(dep_info['remaining_amount'], 2)
+        total_rows = len(dep_info['splits']) + (1 if rem > 0 else 0)
+        is_split = total_rows > 1
 
         for split in dep_info['splits']:
             row_split = orig_row.copy()
             row_split[COL_AMOUNT] = round(split['amount'], 2)
             row_split[COL_CAT] = 'переказ з власного рахунку'
-            row_split[COL_DESC] = f"[Готівка-Компенсовано] {orig_desc}"
+            row_split[COL_CLEARING_STATUS] = 'Готівка-Компенсовано'
+            if is_split:
+                row_split[COL_DESC] = f"[Оригінал: {orig_amount_str}] [Готівка-Компенсовано] {orig_desc}"
+            else:
+                row_split[COL_DESC] = f"[Готівка-Компенсовано] {orig_desc}"
             row_split[COL_ID] = f"{orig_id}_clear_{split['with_id']}"
             new_rows.append(row_split)
 
-        rem = round(dep_info['remaining_amount'], 2)
         if rem > 0:
             row_rem = orig_row.copy()
             row_rem[COL_AMOUNT] = rem
             row_rem[COL_CAT] = 'поповнення готівкою'
-            row_rem[COL_DESC] = orig_desc
+            row_rem[COL_CLEARING_STATUS] = '-'
+            if is_split:
+                row_rem[COL_DESC] = f"[Оригінал: {orig_amount_str}] {orig_desc}"
+            else:
+                row_rem[COL_DESC] = orig_desc
             row_rem[COL_ID] = orig_id
             new_rows.append(row_rem)
 
@@ -860,6 +891,7 @@ def expand_commission_splits_for_reports(df: pd.DataFrame) -> pd.DataFrame:
         comm_row = orig_row.copy()
         comm_row[COL_AMOUNT] = -commission
         comm_row[COL_CAT] = 'інші витрати'
+        comm_row[COL_CLEARING_STATUS] = '-'
         comm_row[COL_ID] = f"{orig_id}_comm"
 
         new_rows.append(main_row)
@@ -883,11 +915,18 @@ def process_transit_vika(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     df_out = df.copy()
+    if COL_CLEARING_STATUS not in df_out.columns:
+        df_out[COL_CLEARING_STATUS] = '-'
 
     for idx, row in df_out.iterrows():
         amount = float(row.get(COL_AMOUNT, 0.0) or 0.0)
         card_str = str(row.get(COL_CARD, '') or '')
         desc = str(row.get(COL_DESC, '') or '')
+        cat = str(row.get(COL_CAT, '') or '')
+
+        # Захист: якщо вже розпізнано як власний переказ, НЕ перезаписуємо
+        if cat in ('переказ на власний рахунок', 'переказ з власного рахунку'):
+            continue
 
         # Умови:
         # 1. Позитивна транзакція (Сума > 0)
@@ -896,6 +935,7 @@ def process_transit_vika(df: pd.DataFrame) -> pd.DataFrame:
         if amount > 0 and ('monobank' in card_str.lower() or '7854' in card_str):
             if 'sidorska viktoriia' in desc.lower():
                 df_out.loc[idx, COL_CAT] = 'транзит Віка'
+                df_out.loc[idx, COL_CLEARING_STATUS] = 'Транзит Віка'
 
     return df_out
 
@@ -914,6 +954,10 @@ def process_mono_investments(df: pd.DataFrame) -> pd.DataFrame:
         amount = float(row.get(COL_AMOUNT, 0.0) or 0.0)
         card_str = str(row.get(COL_CARD, '') or '')
         cat = str(row.get(COL_CAT, '') or '')
+
+        # Захист: якщо вже розпізнано як власний переказ, НЕ перезаписуємо
+        if cat in ('переказ на власний рахунок', 'переказ з власного рахунку'):
+            continue
 
         # Умови:
         # 1. Від'ємна транзакція (Сума < 0)
@@ -1034,21 +1078,37 @@ def process_investment_transit_clearing(df: pd.DataFrame) -> pd.DataFrame:
         orig_row = e_info['orig_row']
         orig_desc = str(orig_row.get(COL_DESC, '') or '')
         orig_id = e_info['id']
+        try:
+            orig_amount = float(orig_row.get(COL_AMOUNT, 0.0) or 0.0)
+        except (ValueError, TypeError):
+            orig_amount = 0.0
+        orig_amount_str = f"{orig_amount:.2f}"
+
+        rem = round(e_info['remaining_amount_abs'], 2)
+        total_rows = len(e_info['splits']) + (1 if rem > 0 else 0)
+        is_split = total_rows > 1
 
         for split in e_info['splits']:
             row_split = orig_row.copy()
             row_split[COL_AMOUNT] = -round(split['amount'], 2)
             row_split[COL_CAT] = 'інвестиції (транзит Віка)'
-            row_split[COL_DESC] = f"[Транзит Віка - Компенсовано] {orig_desc}"
+            row_split[COL_CLEARING_STATUS] = 'Транзит Віка'
+            if is_split:
+                row_split[COL_DESC] = f"[Оригінал: {orig_amount_str}] [Транзит Віка - Компенсовано] {orig_desc}"
+            else:
+                row_split[COL_DESC] = f"[Транзит Віка - Компенсовано] {orig_desc}"
             row_split[COL_ID] = f"{split['dep_id']}_clear_{orig_id}"
             new_rows.append(row_split)
 
-        rem = round(e_info['remaining_amount_abs'], 2)
         if rem > 0:
             row_rem = orig_row.copy()
             row_rem[COL_AMOUNT] = -rem
             row_rem[COL_CAT] = 'інвестиції'
-            row_rem[COL_DESC] = orig_desc
+            row_rem[COL_CLEARING_STATUS] = '-'
+            if is_split:
+                row_rem[COL_DESC] = f"[Оригінал: {orig_amount_str}] {orig_desc}"
+            else:
+                row_rem[COL_DESC] = orig_desc
             row_rem[COL_ID] = orig_id
             new_rows.append(row_rem)
 
@@ -1057,21 +1117,37 @@ def process_investment_transit_clearing(df: pd.DataFrame) -> pd.DataFrame:
         orig_row = d_info['orig_row']
         orig_desc = str(orig_row.get(COL_DESC, '') or '')
         orig_id = d_info['id']
+        try:
+            orig_amount = float(orig_row.get(COL_AMOUNT, 0.0) or 0.0)
+        except (ValueError, TypeError):
+            orig_amount = 0.0
+        orig_amount_str = f"{orig_amount:.2f}"
+
+        rem = round(d_info['remaining_amount'], 2)
+        total_rows = len(d_info['splits']) + (1 if rem > 0 else 0)
+        is_split = total_rows > 1
 
         for split in d_info['splits']:
             row_split = orig_row.copy()
             row_split[COL_AMOUNT] = round(split['amount'], 2)
             row_split[COL_CAT] = 'транзит Віка'
-            row_split[COL_DESC] = f"[Транзит Віка - Компенсовано] {orig_desc}"
+            row_split[COL_CLEARING_STATUS] = 'Транзит Віка'
+            if is_split:
+                row_split[COL_DESC] = f"[Оригінал: {orig_amount_str}] [Транзит Віка - Компенсовано] {orig_desc}"
+            else:
+                row_split[COL_DESC] = f"[Транзит Віка - Компенсовано] {orig_desc}"
             row_split[COL_ID] = f"{orig_id}_clear_{split['exp_id']}"
             new_rows.append(row_split)
 
-        rem = round(d_info['remaining_amount'], 2)
         if rem > 0:
             row_rem = orig_row.copy()
             row_rem[COL_AMOUNT] = rem
             row_rem[COL_CAT] = 'транзит Віка'
-            row_rem[COL_DESC] = orig_desc
+            row_rem[COL_CLEARING_STATUS] = 'Транзит Віка'
+            if is_split:
+                row_rem[COL_DESC] = f"[Оригінал: {orig_amount_str}] {orig_desc}"
+            else:
+                row_rem[COL_DESC] = orig_desc
             row_rem[COL_ID] = orig_id
             new_rows.append(row_rem)
 

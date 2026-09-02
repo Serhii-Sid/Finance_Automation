@@ -162,6 +162,9 @@ def main():
         # Застосовуємо оновлену категоризацію до всієї бази
         df_final = clean_and_transform(df_final)
 
+        # Виявлення внутрішніх переказів (detect_internal_transfers) — НАЙВИЩИЙ ПРІОРИТЕТ
+        df_final = detect_internal_transfers(df_final)
+
         # Маркування прихідних транзакцій від Віки
         df_final = process_transit_vika(df_final)
 
