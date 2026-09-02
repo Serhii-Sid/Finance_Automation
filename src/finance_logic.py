@@ -829,6 +829,46 @@ def expand_commission_splits_for_reports(df: pd.DataFrame) -> pd.DataFrame:
     neg_all = valid_df[(valid_df[COL_AMOUNT] < 0) & (valid_df[COL_CAT] == 'переказ на власний рахунок')].sort_values('naive_date')
 
     already_matched = set()
+
+    # --- Крок 1: Точні 1-в-1 збіги сум (комісія = 0.00 грн) ---
+    # Спочатку знаходимо та виключаємо точні парні перекази без комісії,
+    # щоб запобігти помилковому розщепленню чистих переказів (наприклад, -1300 та +1300)
+    transfer_subset = valid_df[valid_df[COL_CAT].isin(['переказ на власний рахунок', 'переказ з власного рахунку'])]
+    grouped = transfer_subset.groupby('abs_amount')
+
+    for abs_amt, group in grouped:
+        if len(group) < 2:
+            continue
+        pos_g = group[group[COL_AMOUNT] > 0]
+        neg_g = group[group[COL_AMOUNT] < 0]
+        if pos_g.empty or neg_g.empty:
+            continue
+
+        matched_pos_in_group = set()
+        for neg_idx, neg_row in neg_g.iterrows():
+            if neg_idx in already_matched:
+                continue
+            neg_time = neg_row['naive_date']
+            neg_card = neg_row[COL_CARD]
+            best_pos_idx = None
+            best_time_diff = pd.Timedelta(days=99999)
+
+            for pos_idx, pos_row in pos_g.iterrows():
+                if pos_idx in matched_pos_in_group or pos_idx in already_matched:
+                    continue
+                if pos_row[COL_CARD] == neg_card:
+                    continue
+                time_diff = abs(neg_time - pos_row['naive_date'])
+                if time_diff <= pd.Timedelta(minutes=5) and time_diff < best_time_diff:
+                    best_time_diff = time_diff
+                    best_pos_idx = pos_idx
+
+            if best_pos_idx is not None:
+                matched_pos_in_group.add(best_pos_idx)
+                already_matched.add(neg_idx)
+                already_matched.add(best_pos_idx)
+
+    # --- Крок 2: М'який збіг із комісією для РЕШТИ незв'язаних транзакцій ---
     splits_to_apply = []
 
     for neg_idx, neg_row in neg_all.iterrows():
