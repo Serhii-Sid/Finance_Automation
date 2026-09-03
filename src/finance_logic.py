@@ -342,8 +342,8 @@ def detect_internal_transfers(df: pd.DataFrame) -> pd.DataFrame:
                     continue
                 if pos_row[COL_CARD] == neg_card:
                     continue
-                time_diff = abs(neg_time - pos_row['naive_date'])
-                if time_diff <= pd.Timedelta(minutes=5) and time_diff < best_time_diff:
+                time_diff = pos_row['naive_date'] - neg_time
+                if pd.Timedelta(0) <= time_diff <= pd.Timedelta(minutes=5) and time_diff < best_time_diff:
                     best_time_diff = time_diff
                     best_pos_idx = pos_idx
 
@@ -390,8 +390,8 @@ def detect_internal_transfers(df: pd.DataFrame) -> pd.DataFrame:
             if not (abs_pos <= abs_neg and (abs_neg - abs_pos) <= max_commission):
                 continue
 
-            time_diff = abs(neg_time - pos_row['naive_date'])
-            if time_diff <= pd.Timedelta(minutes=5) and time_diff < best_time_diff:
+            time_diff = pos_row['naive_date'] - neg_time
+            if pd.Timedelta(0) <= time_diff <= pd.Timedelta(minutes=5) and time_diff < best_time_diff:
                 best_time_diff = time_diff
                 best_pos_idx   = pos_idx
 
@@ -600,6 +600,9 @@ def process_cash_clearing(df: pd.DataFrame) -> pd.DataFrame:
 
                 dep_info = deposit_tracker[d_idx]
                 if dep_info['remaining_amount'] > 0:
+                    # Хронологічне обмеження: Зняття готівки в банкоматі має передувати або бути в той самий день, що й поповнення картки
+                    if w_info['date'].date() > dep_info['date'].date():
+                        continue
                     cleared_amount = round(min(w_info['remaining_amount_abs'], dep_info['remaining_amount']), 2)
                     if cleared_amount > 0:
                         dep_info['remaining_amount'] = round(dep_info['remaining_amount'] - cleared_amount, 2)
@@ -654,6 +657,9 @@ def process_cash_clearing(df: pd.DataFrame) -> pd.DataFrame:
 
                 dep_info = deposit_tracker[d_idx]
                 if dep_info['remaining_amount'] > 0:
+                    # Хронологічне обмеження: Зняття готівки в банкоматі має передувати або бути в той самий день, що й поповнення картки
+                    if w_info['date'].date() > dep_info['date'].date():
+                        continue
                     cleared_amount = round(min(w_info['remaining_amount_abs'], dep_info['remaining_amount']), 2)
                     if cleared_amount > 0:
                         dep_info['remaining_amount'] = round(dep_info['remaining_amount'] - cleared_amount, 2)
@@ -858,8 +864,8 @@ def expand_commission_splits_for_reports(df: pd.DataFrame) -> pd.DataFrame:
                     continue
                 if pos_row[COL_CARD] == neg_card:
                     continue
-                time_diff = abs(neg_time - pos_row['naive_date'])
-                if time_diff <= pd.Timedelta(minutes=5) and time_diff < best_time_diff:
+                time_diff = pos_row['naive_date'] - neg_time
+                if pd.Timedelta(0) <= time_diff <= pd.Timedelta(minutes=5) and time_diff < best_time_diff:
                     best_time_diff = time_diff
                     best_pos_idx = pos_idx
 
@@ -898,8 +904,8 @@ def expand_commission_splits_for_reports(df: pd.DataFrame) -> pd.DataFrame:
             if not (abs_pos < abs_neg and (abs_neg - abs_pos) <= max_commission):
                 continue
 
-            time_diff = abs(neg_time - pos_row['naive_date'])
-            if time_diff <= pd.Timedelta(minutes=5) and time_diff < best_time_diff:
+            time_diff = pos_row['naive_date'] - neg_time
+            if pd.Timedelta(0) <= time_diff <= pd.Timedelta(minutes=5) and time_diff < best_time_diff:
                 best_time_diff = time_diff
                 best_pos_idx = pos_idx
 
@@ -1047,6 +1053,7 @@ def process_investment_transit_clearing(df: pd.DataFrame) -> pd.DataFrame:
         deposit_tracker[d_idx] = {
             'id': str(row[COL_ID]),
             'date': row[COL_DATE],
+            'naive_date': row['naive_date'],
             'amount': amount,
             'remaining_amount': amount,
             'splits': [],
@@ -1059,6 +1066,7 @@ def process_investment_transit_clearing(df: pd.DataFrame) -> pd.DataFrame:
         expense_tracker[e_idx] = {
             'id': str(row[COL_ID]),
             'date': row[COL_DATE],
+            'naive_date': row['naive_date'],
             'amount_abs': amount_abs,
             'remaining_amount_abs': amount_abs,
             'splits': [],
@@ -1075,6 +1083,10 @@ def process_investment_transit_clearing(df: pd.DataFrame) -> pd.DataFrame:
                 break
 
             if e_info['remaining_amount_abs'] > 0:
+                # Хронологічне обмеження: прихід від Віки (d_info) має передувати або бути в той самий день, що й інвестиція (e_info)
+                if d_info['naive_date'].date() > e_info['naive_date'].date():
+                    continue
+
                 cleared_amount = round(min(d_info['remaining_amount'], e_info['remaining_amount_abs']), 2)
                 if cleared_amount > 0:
                     d_info['remaining_amount'] = round(d_info['remaining_amount'] - cleared_amount, 2)
