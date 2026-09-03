@@ -118,21 +118,23 @@ def generate_daily_dashboard(df_ledger: pd.DataFrame) -> pd.DataFrame:
             }
             final_rows.append(summary_dict)
             
-            # 2. Детальні рядки дня з оброблених масивів Income та Expenses (Level 1)
-            day_exp = df_expenses_details[df_expenses_details['Дата_Норм'] == dt]
-            day_inc = df_income_details[df_income_details['Дата_Норм'] == dt]
+            # 2. Детальні рядки дня зі ВСІХ оброблених транзакцій (включаючи технічні та компенсовані)
+            day_details = df[(df['Дата_Норм'] == dt) & (df[COL_AMOUNT] != 0)]
             
-            if not day_exp.empty or not day_inc.empty:
-                day_details = pd.concat([day_exp, day_inc]).sort_values(COL_DATE)
-                for _, d_row in day_details.iterrows():
+            if not day_details.empty:
+                day_details_sorted = day_details.sort_values(COL_DATE)
+                for _, d_row in day_details_sorted.iterrows():
                     amt = float(d_row.get(COL_AMOUNT, 0.0) or 0.0)
                     card = str(d_row.get(COL_CARD, '') or '').strip()
                     cat = str(d_row.get(COL_CAT, '') or '').strip()
                     desc = str(d_row.get(COL_DESC, '') or '').strip()
                     
+                    is_comp_cat = cat in ['переказ на власний рахунок', 'переказ з власного рахунку', 'зняття готівки', 'поповнення готівкою', 'транзит Віка', 'інвестиції (транзит Віка)']
+                    prefix = "   ↳ ⚙️ [Компенсовано] " if is_comp_cat else "   ↳ "
+                    
                     detail_dict = {
-                        'Місяць': '',
-                        'Дата': f"   ↳ [{card}] {cat}: {desc}",
+                        'Місяць': f"{prefix}[{card}] {cat}: {desc}",
+                        'Дата': '',
                         'План': None,
                         'Витрати': amt if amt < 0 else None,
                         'Дохід': amt if amt > 0 else None,
@@ -458,15 +460,19 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                     daily_summary_count = 0
                     for row_idx in range(1, sheet.max_row + 1):
                         is_header = (row_idx == 1)
-                        curr_val = str(sheet.cell(row=row_idx, column=2).value or '')
-                        is_rahom = curr_val.startswith('РАЗОМ')
-                        is_detail = curr_val.strip().startswith('↳') or curr_val.strip().startswith('   ↳')
+                        val1 = str(sheet.cell(row=row_idx, column=1).value or '')
+                        val2 = str(sheet.cell(row=row_idx, column=2).value or '')
+                        curr_val = val1 if '↳' in val1 else val2
+                        is_rahom = val2.startswith('РАЗОМ') or val1.startswith('РАЗОМ')
+                        is_detail = '↳' in val1 or '↳' in val2
 
                         if is_header or is_rahom:
                             sheet.row_dimensions[row_idx].outline_level = 0
                         elif is_detail:
                             sheet.row_dimensions[row_idx].outline_level = 1
                             sheet.row_dimensions[row_idx].hidden = True
+                            # Об'єднуємо комірки A та B (стовпчики "Місяць" та "Дата") для детального рядка
+                            sheet.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=2)
                         else:
                             sheet.row_dimensions[row_idx].outline_level = 0
                             daily_summary_count += 1
@@ -484,13 +490,21 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                                                      right=thick_side if col_idx == 8 else thin_side,
                                                      top=thick_side, bottom=thick_side)
                             elif is_detail:
-                                cell.font = Font(size=10, italic=True, color="595959")
+                                is_comp = '⚙️' in curr_val or '[Компенсовано]' in curr_val or any(c in curr_val for c in [
+                                    'переказ на власний рахунок', 'переказ з власного рахунку', 
+                                    'зняття готівки', 'поповнення готівкою', 
+                                    'транзит Віка', 'інвестиції (транзит Віка)'
+                                ])
+                                if is_comp:
+                                    cell.font = Font(name="Calibri", size=9, italic=True, color="A0A0A0")
+                                else:
+                                    cell.font = Font(name="Calibri", size=10, italic=False, color="000000")
                                 cell.fill = no_fill
                                 cell.border = Border(left=thick_side if col_idx == 1 else light_grid_side,
                                                      right=thick_side if col_idx == 8 else light_grid_side,
                                                      top=light_grid_side, bottom=light_grid_side)
                                 if col_idx in (1, 2):
-                                    cell.alignment = align_left
+                                    cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
                                 else:
                                     cell.alignment = align_right
                             else:
@@ -516,8 +530,9 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                     # Групуємо детальні рядки кожного дня
                     curr_start = None
                     for row_idx in range(2, sheet.max_row + 1):
-                        curr_val = str(sheet.cell(row=row_idx, column=2).value or '')
-                        is_det = curr_val.strip().startswith('↳') or curr_val.strip().startswith('   ↳')
+                        val1 = str(sheet.cell(row=row_idx, column=1).value or '')
+                        val2 = str(sheet.cell(row=row_idx, column=2).value or '')
+                        is_det = '↳' in val1 or '↳' in val2
                         if is_det:
                             if curr_start is None:
                                 curr_start = row_idx
