@@ -22,7 +22,7 @@ from src.finance_logic import (
 logger = logging.getLogger(__name__)
 
 def generate_daily_dashboard(df_ledger: pd.DataFrame) -> pd.DataFrame:
-    """Генерує щоденний дашборд за структурою ручного леджера (Витрати.csv) з 4 візуальними секціями."""
+    """Генерує щоденний дашборд із групованими деталями оброблених транзакцій під кожним днем."""
     if df_ledger is None or df_ledger.empty:
         return pd.DataFrame(columns=[
             'Місяць', 'Дата', 'План', 'Витрати', 'Дохід', 
@@ -31,7 +31,6 @@ def generate_daily_dashboard(df_ledger: pd.DataFrame) -> pd.DataFrame:
     
     df = expand_commission_splits_for_reports(df_ledger)
     df[COL_DATE] = pd.to_datetime(df[COL_DATE])
-    # Localize to naive just in case
     if df[COL_DATE].dt.tz is not None:
         df[COL_DATE] = df[COL_DATE].dt.tz_localize(None)
         
@@ -39,18 +38,18 @@ def generate_daily_dashboard(df_ledger: pd.DataFrame) -> pd.DataFrame:
     min_date = df['Дата_Норм'].min()
     max_date = df['Дата_Норм'].max()
     
-    # Generate continuous dates
     all_dates = pd.date_range(start=min_date, end=max_date, freq='D')
     
-    # Витрати: сума < 0 (зберігаємо як від'ємні числа, ігноруємо перекази на власний рахунок, зняття готівки, транзит Віка та компенсовані інвестиції)
+    # Маски для фільтрації оброблених витрат та доходів (ті ж самі, що формують Income та Expenses)
     expenses_mask = (df[COL_AMOUNT] < 0) & (~df[COL_CAT].isin(['переказ на власний рахунок', 'зняття готівки', 'транзит Віка', 'інвестиції (транзит Віка)']))
-    df_expenses = df[expenses_mask].groupby('Дата_Норм')[COL_AMOUNT].sum()
-    
-    # Доходи: позитивні суми (Сума > 0, ігноруємо перекази з власного рахунку, поповнення готівкою та транзит Віка)
     income_mask = (df[COL_AMOUNT] > 0) & (~df[COL_CAT].isin(['переказ з власного рахунку', 'поповнення готівкою', 'транзит Віка']))
-    df_income = df[income_mask].groupby('Дата_Норм')[COL_AMOUNT].sum()
     
-    # Для закритих місяців рахуємо сумарні доходи по місяцях
+    df_exp_grouped = df[expenses_mask].groupby('Дата_Норм')[COL_AMOUNT].sum()
+    df_inc_grouped = df[income_mask].groupby('Дата_Норм')[COL_AMOUNT].sum()
+    
+    df_expenses_details = df[expenses_mask].copy()
+    df_income_details = df[income_mask].copy()
+    
     month_income_totals = {}
     for (yr, mn), group in df[income_mask].groupby([df[COL_DATE].dt.year, df[COL_DATE].dt.month]):
         month_income_totals[(yr, mn)] = group[COL_AMOUNT].sum()
@@ -63,73 +62,95 @@ def generate_daily_dashboard(df_ledger: pd.DataFrame) -> pd.DataFrame:
         7: 'Липень', 8: 'Серпень', 9: 'Вересень', 10: 'Жовтень', 11: 'Листопад', 12: 'Грудень'
     }
     
-    rows = []
+    daily_summary_rows = []
     for dt in all_dates:
         yr, mn = dt.year, dt.month
         days_in_month = pd.Period(year=yr, month=mn, freq='M').days_in_month
         
-        # Дохідна логіка для дня
-        daily_income = df_income.get(dt, 0.0)
+        daily_income = df_inc_grouped.get(dt, 0.0)
         
-        # План для дня
         if (yr, mn) not in plan_cache:
             is_closed = (yr < now.year) or (yr == now.year and mn < now.month)
             if is_closed:
-                # План = Сума доходу за цей місяць / дні місяця
                 tot_inc = month_income_totals.get((yr, mn), 0.0)
                 plan_cache[(yr, mn)] = tot_inc / days_in_month
             else:
-                # Відкритий місяць: прогноз 40000 / дні місяця
                 plan_cache[(yr, mn)] = 40000.0 / days_in_month
                 
         plan = plan_cache[(yr, mn)]
-        daily_expense = df_expenses.get(dt, 0.0) # Вже від'ємне
+        daily_expense = df_exp_grouped.get(dt, 0.0)
         
-        rows.append({
+        daily_summary_rows.append({
+            'dt_norm': dt,
+            'temp_year': yr,
+            'temp_month': mn,
             'Місяць': f"{ukr_months_nominative[mn]} {yr}",
-            'Дата': dt,
+            'Дата_Obj': dt,
             'План': plan,
             'Витрати': daily_expense,
             'Дохід': daily_income
         })
         
-    df_dash = pd.DataFrame(rows)
+    df_dash_summary = pd.DataFrame(daily_summary_rows)
+    df_dash_summary['Різниця за день'] = df_dash_summary['План'] + df_dash_summary['Витрати']
+    df_dash_summary['Різниця за місяць'] = df_dash_summary.groupby(['temp_year', 'temp_month'])['Різниця за день'].cumsum()
     
-    # Різниця за день
-    df_dash['Різниця за день'] = df_dash['План'] + df_dash['Витрати']
-    
-    # Різниця за місяць = cumulative sum of Різниця за день (reset every month)
-    df_dash['Різниця за місяць'] = df_dash.groupby([df_dash['Дата'].dt.year, df_dash['Дата'].dt.month])['Різниця за день'].cumsum()
-    
-    # Різниця загалом = -48807.41 + cumulative sum of Різниця за день за весь період
     INITIAL_TOTAL_BALANCE = -48807.41
-    df_dash['Різниця загалом'] = INITIAL_TOTAL_BALANCE + df_dash['Різниця за день'].cumsum()
+    df_dash_summary['Різниця загалом'] = INITIAL_TOTAL_BALANCE + df_dash_summary['Різниця за день'].cumsum()
     
-    # Тимчасові стовпці для групування
-    df_dash['temp_year'] = df_dash['Дата'].dt.year
-    df_dash['temp_month'] = df_dash['Дата'].dt.month
-    
-    # Форматуємо 'Дата' як чистий рядок dd.mm.yyyy
-    df_dash['Дата'] = df_dash['Дата'].dt.strftime('%d.%m.%Y')
-    
-    grouped = df_dash.groupby(['temp_year', 'temp_month'], sort=False)
+    grouped_months = df_dash_summary.groupby(['temp_year', 'temp_month'], sort=False)
     
     final_rows = []
-    for (yr, mn), group in grouped:
+    for (yr, mn), group in grouped_months:
         for idx, row in group.iterrows():
-            final_rows.append(row.to_dict())
+            dt = row['dt_norm']
             
-        # Розраховуємо суми за місяць
+            # 1. Щоденний підсумковий рядок (Level 0)
+            summary_dict = {
+                'Місяць': row['Місяць'],
+                'Дата': dt.strftime('%d.%m.%Y'),
+                'План': row['План'],
+                'Витрати': row['Витрати'],
+                'Дохід': row['Дохід'],
+                'Різниця за день': row['Різниця за день'],
+                'Різниця за місяць': row['Різниця за місяць'],
+                'Різниця загалом': row['Різниця загалом']
+            }
+            final_rows.append(summary_dict)
+            
+            # 2. Детальні рядки дня з оброблених масивів Income та Expenses (Level 1)
+            day_exp = df_expenses_details[df_expenses_details['Дата_Норм'] == dt]
+            day_inc = df_income_details[df_income_details['Дата_Норм'] == dt]
+            
+            if not day_exp.empty or not day_inc.empty:
+                day_details = pd.concat([day_exp, day_inc]).sort_values(COL_DATE)
+                for _, d_row in day_details.iterrows():
+                    amt = float(d_row.get(COL_AMOUNT, 0.0) or 0.0)
+                    card = str(d_row.get(COL_CARD, '') or '').strip()
+                    cat = str(d_row.get(COL_CAT, '') or '').strip()
+                    desc = str(d_row.get(COL_DESC, '') or '').strip()
+                    
+                    detail_dict = {
+                        'Місяць': '',
+                        'Дата': f"   ↳ [{card}] {cat}: {desc}",
+                        'План': None,
+                        'Витрати': amt if amt < 0 else None,
+                        'Дохід': amt if amt > 0 else None,
+                        'Різниця за день': None,
+                        'Різниця за місяць': None,
+                        'Різниця загалом': None
+                    }
+                    final_rows.append(detail_dict)
+            
+        # 3. Підсумковий рядок місяця РАЗОМ за [Місяць] (виключає детальні рядки, запобігаючи подвійному підрахунку)
         sum_plan = group['План'].sum()
         sum_expenses = group['Витрати'].sum()
         sum_income = group['Дохід'].sum()
         
-        # Беремо останні накопичувальні значення місяця
         last_day_row = group.iloc[-1]
         final_diff_month = last_day_row['Різниця за місяць']
         final_diff_total = last_day_row['Різниця загалом']
         
-        # Створюємо підсумковий рядок РАЗОМ
         month_name = ukr_months_nominative[mn]
         rahom_row = {
             'Місяць': f"{month_name} {yr}",
@@ -139,16 +160,11 @@ def generate_daily_dashboard(df_ledger: pd.DataFrame) -> pd.DataFrame:
             'Дохід': sum_income,
             'Різниця за день': None,
             'Різниця за місяць': final_diff_month,
-            'Різниця загалом': final_diff_total,
-            'temp_year': yr,
-            'temp_month': mn
+            'Різниця загалом': final_diff_total
         }
         final_rows.append(rahom_row)
         
     df_dash_final = pd.DataFrame(final_rows)
-    df_dash_final = df_dash_final.drop(columns=['temp_year', 'temp_month'], errors='ignore')
-    
-    # Переконуємось у правильному порядку колонок
     col_order = ['Місяць', 'Дата', 'План', 'Витрати', 'Дохід', 'Різниця за день', 'Різниця за місяць', 'Різниця загалом']
     df_dash_final = df_dash_final[col_order]
     
@@ -293,360 +309,131 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                     sheet.auto_filter.ref = sheet.dimensions
 
                 elif sheet_name == 'Reconciliation_Audit':
-                    # --- Побудова деревоподібного листа звірки (Parent-Child Blocks) ---
-                    sheet.row_dimensions[1].height = 30
+                    # --- Карта компенсацій (Reconciliation Dashboard) ---
+                    sheet.row_dimensions[1].height = 24
+                    sheet.row_dimensions[2].height = 24
+
                     header_fill_audit = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
                     header_font_audit = Font(bold=True, color="FFFFFF", size=11)
                     header_alignment = Alignment(horizontal="center", vertical="center")
                     thin_grid_side = Side(style='thin', color="A6A6A6")
+                    thick_grid_side = Side(style='medium', color="000000")
                     header_border = Border(left=thin_grid_side, right=thin_grid_side, top=thin_grid_side, bottom=thin_grid_side)
 
-                    for cell in sheet[1]:
-                        cell.font = header_font_audit
-                        cell.fill = header_fill_audit
-                        cell.alignment = header_alignment
-                        cell.border = header_border
+                    # Заголовки першого рівня (Групування)
+                    sheet.merge_cells('A1:A2')
+                    sheet.cell(row=1, column=1, value="Тип клірингу")
 
-                    # Стилі блоків
-                    parent_fill = PatternFill(fill_type=None)
-                    parent_font = Font(bold=True, size=11, color="000000")
+                    sheet.merge_cells('B1:E1')
+                    sheet.cell(row=1, column=2, value="ДЖЕРЕЛО (ОРИГІНАЛЬНА ОПЕРАЦІЯ)")
 
-                    child_fill = PatternFill(fill_type=None)
-                    child_font = Font(size=11, color="000000")
+                    sheet.merge_cells('F1:I1')
+                    sheet.cell(row=1, column=6, value="КОМПЕНСАЦІЯ (ЗІСТАВЛЕНА ОПЕРАЦІЯ)")
 
-                    summary_fill = PatternFill(fill_type=None)
-                    summary_font = Font(bold=True, size=11, color="000000")
+                    sheet.merge_cells('J1:J2')
+                    sheet.cell(row=1, column=10, value="Різниця (Комісія)")
 
-                    twins_fill = PatternFill(fill_type=None)
-                    twins_font = Font(size=11, color="000000")
+                    # Заголовки другого рівня
+                    headers_r2 = {
+                        2: "Дата", 3: "Картка", 4: "Опис", 5: "Сума",
+                        6: "Дата", 7: "Картка", 8: "Опис", 9: "Сума"
+                    }
+                    for c_idx, text in headers_r2.items():
+                        sheet.cell(row=2, column=c_idx, value=text)
+
+                    # Стилізація заголовків (Row 1 & Row 2)
+                    for r_idx in (1, 2):
+                        for c_idx in range(1, 11):
+                            cell = sheet.cell(row=r_idx, column=c_idx)
+                            cell.font = header_font_audit
+                            cell.fill = header_fill_audit
+                            cell.alignment = header_alignment
+                            cell.border = header_border
+
+                    # Отримуємо реєстр збережених компенсацій
+                    df_audit_data = ReconciliationRegistry.get_df()
 
                     align_center = Alignment(horizontal="center", vertical="center")
                     align_left = Alignment(horizontal="left", vertical="center")
                     align_right = Alignment(horizontal="right", vertical="center")
 
-                    df_audit_data = ReconciliationRegistry.get_df()
+                    zebra_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+                    no_fill = PatternFill(fill_type=None)
 
-                    events = []
-                    if not df_audit_data.empty and 'Тип компенсації' in df_audit_data.columns:
-                        df_cash = df_audit_data[df_audit_data['Тип компенсації'].str.contains('Cash Clearing|Готівка', case=False, na=False)].copy()
-                        df_twins = df_audit_data[df_audit_data['Тип компенсації'].str.contains('Twins', case=False, na=False)].copy()
-                        df_transit = df_audit_data[df_audit_data['Тип компенсації'].str.contains('Investment Transit|Віка', case=False, na=False)].copy()
+                    current_row = 3
+                    if not df_audit_data.empty:
+                        for pair_idx, row in df_audit_data.iterrows():
+                            clear_type_raw = str(row.get('Тип компенсації', '') or '')
+                            if 'Cash' in clear_type_raw or 'Готівка' in clear_type_raw:
+                                clear_type = 'Готівка'
+                            elif 'Transit' in clear_type_raw or 'Віка' in clear_type_raw:
+                                clear_type = 'Транзит Віка'
+                            elif 'Twins' in clear_type_raw or 'Картка' in clear_type_raw:
+                                clear_type = 'Внутрішній переказ'
+                            else:
+                                clear_type = clear_type_raw
 
-                        # 1. Події Cash Clearing (групування за ID зняття)
-                        if not df_cash.empty:
-                            grouped_cash = df_cash.groupby('ID зняття', sort=False)
-                            for w_id, group in grouped_cash:
-                                first_w_date = pd.to_datetime(group.iloc[0]['Дата зняття'])
-                                events.append({
-                                    'type': 'cash',
-                                    'date': first_w_date,
-                                    'data': group
-                                })
+                            date_src = row.get('Дата зняття')
+                            card_src = str(row.get('Картка джерела', '') or row.get('Опис зняття', '')).strip()
+                            desc_src = str(row.get('Опис зняття', '') or '')
+                            amt_src = abs(float(row.get('Сума зняття', 0.0) or 0.0))
 
-                        # 2. Події Twins (кожна транзакція — окрема подія)
-                        if not df_twins.empty:
-                            for _, t_row in df_twins.iterrows():
-                                t_date = pd.to_datetime(t_row['Дата зняття'])
-                                events.append({
-                                    'type': 'twins',
-                                    'date': t_date,
-                                    'data': t_row
-                                })
+                            date_dst = row.get('Дата поповнення')
+                            card_dst = str(row.get('Картка отримувача', '') or row.get('Опис поповнення', '')).strip()
+                            desc_dst = str(row.get('Опис поповнення', '') or '')
+                            cleared_amt = float(row.get('Сума компенсації', 0.0) or 0.0)
 
-                        # 3. Події Investment Transit (групування за ID поповнення)
-                        if not df_transit.empty:
-                            grouped_transit = df_transit.groupby('ID поповнення', sort=False)
-                            for dep_id, group in grouped_transit:
-                                first_dep_date = pd.to_datetime(group.iloc[0]['Дата поповнення'])
-                                events.append({
-                                    'type': 'transit_vika',
-                                    'date': first_dep_date,
-                                    'data': group
-                                })
+                            # Для транзиту Віки джерелом є прихід від Віки (date_right), а компенсацією є інвестиція (date_left)
+                            if clear_type == 'Транзит Віка':
+                                date_src, date_dst = date_dst, date_src
+                                card_src, card_dst = card_dst, card_src
+                                desc_src, desc_dst = desc_dst, desc_src
+                                amt_src = float(row.get('Сума поповнення', 0.0) or 0.0)
 
-                    # 3. Сортування всіх подій у порядку СПАДАННЯ (від найновіших до найстаріших)
-                    events.sort(key=lambda x: x['date'], reverse=True)
+                            delta = round(amt_src - cleared_amt, 2)
+                            if abs(delta) < 1e-5:
+                                delta = 0.00
 
-                    current_row = 2
-
-                    for event in events:
-                        if event['type'] == 'cash':
-                            group = event['data']
-                            first_row = group.iloc[0]
-                            w_date = first_row['Дата зняття']
-                            w_id = str(first_row['ID зняття'])
-                            w_desc = str(first_row.get('Опис зняття', '') or '')
-                            w_card = str(first_row.get('Картка джерела', '') or w_desc).strip()
-                            w_amount = float(first_row.get('Сума зняття', 0.0) or 0.0)
-
-                            w_dt = pd.to_datetime(w_date) if not isinstance(w_date, (pd.Timestamp, datetime.datetime)) else w_date
-                            w_date_str = w_dt.strftime('%d.%m') if pd.notnull(w_dt) else ""
-
-                            # --- PARENT ROW ---
-                            parent_desc = f"Зняття готівки в банкоматі ({w_card})" if w_card else "Зняття готівки в банкоматі"
-                            parent_vals = [
-                                w_date,
-                                w_id,
-                                parent_desc,
-                                w_amount,
-                                None,
-                                None,
-                                f"Оригінальне зняття готівки від {w_date_str}"
+                            vals = [
+                                clear_type,
+                                date_src,
+                                card_src,
+                                desc_src,
+                                amt_src,
+                                date_dst,
+                                card_dst,
+                                desc_dst,
+                                cleared_amt,
+                                delta
                             ]
-                            sheet.row_dimensions[current_row].height = 24
-                            for c_idx, val in enumerate(parent_vals, 1):
-                                cell = sheet.cell(row=current_row, column=c_idx, value=val)
-                                cell.font = parent_font
-                                cell.fill = parent_fill
-                                cell.border = header_border
-                                if c_idx in (1, 2):
-                                    cell.alignment = align_center
-                                    if c_idx == 1 and isinstance(val, (datetime.datetime, pd.Timestamp)):
-                                        cell.number_format = 'DD.MM.YYYY HH:mm:ss'
-                                elif c_idx == 4:
-                                    cell.alignment = align_right
-                                    cell.number_format = '#,##0.00 "грн."'
-                                else:
-                                    cell.alignment = align_left
-                            current_row += 1
 
-                            # --- CHILD ROWS ---
-                            total_cleared = 0.0
-                            for _, match_row in group.iterrows():
-                                dep_date = match_row['Дата поповнення']
-                                dep_id = str(match_row['ID поповнення'])
-                                dep_desc = str(match_row.get('Опис поповнення', '') or '')
-                                dep_card = str(match_row.get('Картка отримувача', '') or dep_desc).strip()
-                                cleared_amount = float(match_row.get('Сума компенсації', 0.0) or 0.0)
-                                full_dep_amount = float(match_row.get('Сума поповнення', 0.0) or 0.0)
-                                total_cleared += cleared_amount
+                            is_even = (pair_idx % 2 == 0)
+                            row_fill = zebra_fill if is_even else no_fill
 
-                                dep_dt = pd.to_datetime(dep_date) if not isinstance(dep_date, (pd.Timestamp, datetime.datetime)) else dep_date
-                                dep_date_str = dep_dt.strftime('%d.%m') if pd.notnull(dep_dt) else ""
-
-                                if abs(cleared_amount - full_dep_amount) < 1e-5:
-                                    detail_str = f"Повна компенсація: +{cleared_amount:g} грн від {dep_date_str}"
-                                else:
-                                    detail_str = f"Часткова компенсація: +{cleared_amount:g} грн із транзакції на +{full_dep_amount:g} грн від {dep_date_str}"
-
-                                child_vals = [
-                                    dep_date,
-                                    dep_id,
-                                    f"   ↳ Скомпенсовано на {dep_card}",
-                                    None,
-                                    cleared_amount,
-                                    None,
-                                    detail_str
-                                ]
-                                sheet.row_dimensions[current_row].height = 20
-                                for c_idx, val in enumerate(child_vals, 1):
-                                    cell = sheet.cell(row=current_row, column=c_idx, value=val)
-                                    cell.font = child_font
-                                    cell.fill = child_fill
-                                    cell.border = header_border
-                                    if c_idx in (1, 2):
-                                        cell.alignment = align_center
-                                        if c_idx == 1 and isinstance(val, (datetime.datetime, pd.Timestamp)):
-                                            cell.number_format = 'DD.MM.YYYY HH:mm:ss'
-                                    elif c_idx == 5:
-                                        cell.alignment = align_right
-                                        cell.number_format = '#,##0.00 "грн."'
-                                    else:
-                                        cell.alignment = align_left
-                                current_row += 1
-
-                            # --- SUMMARY ROW ---
-                            net_expense = round(w_amount + total_cleared, 2)
-                            summary_vals = [
-                                None,
-                                None,
-                                "[!] РЕАЛЬНІ ВИТРАТИ ГОТІВКИ (ЧИСТИЙ КЕШ)",
-                                None,
-                                None,
-                                net_expense,
-                                "Списано на витрати леджера (чиста готівка)"
-                            ]
                             sheet.row_dimensions[current_row].height = 22
-                            for c_idx, val in enumerate(summary_vals, 1):
+                            for c_idx, val in enumerate(vals, 1):
                                 cell = sheet.cell(row=current_row, column=c_idx, value=val)
-                                cell.font = summary_font
-                                cell.fill = summary_fill
-                                cell.border = header_border
-                                if c_idx == 6:
-                                    cell.alignment = align_right
-                                    cell.number_format = '#,##0.00 "грн."'
-                                else:
-                                    cell.alignment = align_left
-                            current_row += 1
+                                cell.fill = row_fill
 
-                            # --- BLANK SEPARATOR ROW ---
-                            sheet.row_dimensions[current_row].height = 12
-                            for c_idx in range(1, 8):
-                                sheet.cell(row=current_row, column=c_idx, value=None)
-                            current_row += 1
+                                l_side = thick_grid_side if c_idx in (1, 2, 6, 10) else thin_grid_side
+                                r_side = thick_grid_side if c_idx in (1, 5, 9, 10) else thin_grid_side
+                                cell.border = Border(left=l_side, right=r_side, top=thin_grid_side, bottom=thin_grid_side)
 
-                        elif event['type'] == 'twins':
-                            t_row = event['data']
-                            t_date = t_row['Дата зняття']
-                            t_id_src = str(t_row['ID зняття'])
-                            t_desc_src = str(t_row.get('Опис зняття', '') or '')
-                            t_card_src = str(t_row.get('Картка джерела', '') or t_desc_src).strip()
-                            t_id_dst = str(t_row['ID поповнення'])
-                            t_desc_dst = str(t_row.get('Опис поповнення', '') or '')
-                            t_card_dst = str(t_row.get('Картка отримувача', '') or t_desc_dst).strip()
-                            t_amount = float(t_row.get('Сума зняття', 0.0) or 0.0)
-                            t_cleared = float(t_row.get('Сума компенсації', 0.0) or 0.0)
-
-                            dep_dt = pd.to_datetime(t_row['Дата поповнення']) if not isinstance(t_row['Дата поповнення'], (pd.Timestamp, datetime.datetime)) else t_row['Дата поповнення']
-                            dep_date_str = dep_dt.strftime('%d.%m') if pd.notnull(dep_dt) else ""
-
-                            twins_detail_str = f"Внутрішній переказ Twins: елімінація зустрічних транзакцій від {dep_date_str}"
-
-                            twins_vals = [
-                                t_date,
-                                t_id_src,
-                                f"Переказ {t_card_src} ➔ {t_card_dst}",
-                                t_amount,
-                                t_cleared,
-                                0.00,
-                                twins_detail_str
-                            ]
-                            sheet.row_dimensions[current_row].height = 22
-                            for c_idx, val in enumerate(twins_vals, 1):
-                                cell = sheet.cell(row=current_row, column=c_idx, value=val)
-                                cell.font = twins_font
-                                cell.fill = twins_fill
-                                cell.border = header_border
-                                if c_idx in (1, 2):
+                                if c_idx in (1, 2, 6):
                                     cell.alignment = align_center
-                                    if c_idx == 1 and isinstance(val, (datetime.datetime, pd.Timestamp)):
+                                    if c_idx in (2, 6) and isinstance(val, (datetime.datetime, pd.Timestamp)):
                                         cell.number_format = 'DD.MM.YYYY HH:mm:ss'
-                                elif c_idx in (4, 5, 6):
+                                elif c_idx in (5, 9, 10):
                                     cell.alignment = align_right
                                     cell.number_format = '#,##0.00 "грн."'
                                 else:
                                     cell.alignment = align_left
+
                             current_row += 1
 
-                            # BLANK SEPARATOR ROW
-                            sheet.row_dimensions[current_row].height = 12
-                            for c_idx in range(1, 8):
-                                sheet.cell(row=current_row, column=c_idx, value=None)
-                            current_row += 1
-
-                        elif event['type'] == 'transit_vika':
-                            group = event['data']
-                            first_row = group.iloc[0]
-                            dep_date = first_row['Дата поповнення']
-                            dep_id = str(first_row['ID поповнення'])
-                            dep_desc = str(first_row.get('Опис поповнення', '') or '')
-                            dep_card = str(first_row.get('Картка отримувача', '') or 'Monobank Sid Чорна').strip()
-                            dep_amount = float(first_row.get('Сума поповнення', 0.0) or 0.0)
-
-                            dep_dt = pd.to_datetime(dep_date) if not isinstance(dep_date, (pd.Timestamp, datetime.datetime)) else dep_date
-                            dep_date_str = dep_dt.strftime('%d.%m') if pd.notnull(dep_dt) else ""
-
-                            # PARENT ROW (Прихід транзиту від Віки)
-                            parent_desc = f"Транзитні кошти Віки ({dep_card})"
-                            parent_vals = [
-                                dep_date,
-                                dep_id,
-                                parent_desc,
-                                None,
-                                dep_amount,
-                                None,
-                                f"Оригінальний прихід транзиту від {dep_date_str}"
-                            ]
-                            sheet.row_dimensions[current_row].height = 24
-                            for c_idx, val in enumerate(parent_vals, 1):
-                                cell = sheet.cell(row=current_row, column=c_idx, value=val)
-                                cell.font = parent_font
-                                cell.fill = parent_fill
-                                cell.border = header_border
-                                if c_idx in (1, 2):
-                                    cell.alignment = align_center
-                                    if c_idx == 1 and isinstance(val, (datetime.datetime, pd.Timestamp)):
-                                        cell.number_format = 'DD.MM.YYYY HH:mm:ss'
-                                elif c_idx == 5:
-                                    cell.alignment = align_right
-                                    cell.number_format = '#,##0.00 "грн."'
-                                else:
-                                    cell.alignment = align_left
-                            current_row += 1
-
-                            # CHILD ROWS (Компенсовані витрати інвестицій)
-                            total_cleared = 0.0
-                            for _, match_row in group.iterrows():
-                                exp_date = match_row['Дата зняття']
-                                exp_id = str(match_row['ID зняття'])
-                                exp_desc = str(match_row.get('Опис зняття', '') or '')
-                                cleared_amount = float(match_row.get('Сума компенсації', 0.0) or 0.0)
-                                total_cleared += cleared_amount
-
-                                exp_dt = pd.to_datetime(exp_date) if not isinstance(exp_date, (pd.Timestamp, datetime.datetime)) else exp_date
-                                exp_date_str = exp_dt.strftime('%d.%m') if pd.notnull(exp_dt) else ""
-
-                                detail_str = f"Компенсовано витрату інвестицій: -{cleared_amount:g} грн від {exp_date_str}"
-                                child_vals = [
-                                    exp_date,
-                                    f"{dep_id}_clear_{exp_id}",
-                                    f"   ↳ Покрито: [Транзит Віка] {exp_desc}",
-                                    None,
-                                    None,
-                                    cleared_amount,
-                                    detail_str
-                                ]
-                                sheet.row_dimensions[current_row].height = 20
-                                for c_idx, val in enumerate(child_vals, 1):
-                                    cell = sheet.cell(row=current_row, column=c_idx, value=val)
-                                    cell.font = child_font
-                                    cell.fill = child_fill
-                                    cell.border = header_border
-                                    if c_idx in (1, 2):
-                                        cell.alignment = align_center
-                                        if c_idx == 1 and isinstance(val, (datetime.datetime, pd.Timestamp)):
-                                            cell.number_format = 'DD.MM.YYYY HH:mm:ss'
-                                    elif c_idx == 6:
-                                        cell.alignment = align_right
-                                        cell.number_format = '#,##0.00 "грн."'
-                                    else:
-                                        cell.alignment = align_left
-                                current_row += 1
-
-                            # SUMMARY ROW (Вільний залишок транзиту)
-                            rem_transit = round(dep_amount - total_cleared, 2)
-                            if rem_transit > 0:
-                                summary_vals = [
-                                    None,
-                                    None,
-                                    "[!] ТРАНЗИТ ВІКА (ВІЛЬНИЙ ЗАЛИШОК)",
-                                    None,
-                                    rem_transit,
-                                    None,
-                                    f"Вільний залишок транзиту Віки: +{rem_transit:g} грн"
-                                ]
-                                sheet.row_dimensions[current_row].height = 22
-                                for c_idx, val in enumerate(summary_vals, 1):
-                                    cell = sheet.cell(row=current_row, column=c_idx, value=val)
-                                    cell.font = summary_font
-                                    cell.fill = summary_fill
-                                    cell.border = header_border
-                                    if c_idx == 5:
-                                        cell.alignment = align_right
-                                        cell.number_format = '#,##0.00 "грн."'
-                                    else:
-                                        cell.alignment = align_left
-                                current_row += 1
-
-                            # BLANK SEPARATOR ROW
-                            sheet.row_dimensions[current_row].height = 12
-                            for c_idx in range(1, 8):
-                                sheet.cell(row=current_row, column=c_idx, value=None)
-                            current_row += 1
-
-                    sheet.freeze_panes = "A2"
-                    if sheet.max_row >= 1 and sheet.max_column >= 1:
-                        sheet.auto_filter.ref = sheet.dimensions
+                    sheet.freeze_panes = "A3"
+                    if sheet.max_row >= 2 and sheet.max_column >= 1:
+                        sheet.auto_filter.ref = f"A2:J{sheet.max_row}"
 
                 else:
                     # Стилізація Daily_Dashboard
@@ -655,98 +442,92 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
 
                     font_header = Font(bold=True, size=14, color="000000")
                     align_center = Alignment(horizontal="center", vertical="center")
+                    align_left = Alignment(horizontal="left", vertical="center")
+                    align_right = Alignment(horizontal="right", vertical="center")
                     thick_side = Side(style='thick', color="000000")
                     thin_side = Side(style='thin', color="A6A6A6")
+                    light_grid_side = Side(style='thin', color="D9D9D9")
 
-                    # Дані з новими кольорами та вертикальним тонуванням (Зебра)
                     zebra_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
                     no_fill = PatternFill(fill_type=None)
                     rahom_fill = PatternFill(start_color="F9E79F", end_color="F9E79F", fill_type="solid")
                     
+                    # Кнопка відкриття підсумовуючих деталей відображається НАД деталями (на щоденному підсумковому рядку)
+                    sheet.sheet_properties.outlinePr.summaryBelow = False
+
+                    daily_summary_count = 0
                     for row_idx in range(1, sheet.max_row + 1):
                         is_header = (row_idx == 1)
-                        curr_val = sheet.cell(row=row_idx, column=2).value
-                        is_rahom = isinstance(curr_val, str) and curr_val.startswith('РАЗОМ')
-                        is_even = row_idx % 2 == 0
-                        
-                        # Групування рядків за місяцями
-                        if not is_header:
-                            if is_rahom:
-                                sheet.row_dimensions[row_idx].outline_level = 0
-                            else:
-                                sheet.row_dimensions[row_idx].outline_level = 1
-                        
+                        curr_val = str(sheet.cell(row=row_idx, column=2).value or '')
+                        is_rahom = curr_val.startswith('РАЗОМ')
+                        is_detail = curr_val.strip().startswith('↳') or curr_val.strip().startswith('   ↳')
+
+                        if is_header or is_rahom:
+                            sheet.row_dimensions[row_idx].outline_level = 0
+                        elif is_detail:
+                            sheet.row_dimensions[row_idx].outline_level = 1
+                            sheet.row_dimensions[row_idx].hidden = True
+                        else:
+                            sheet.row_dimensions[row_idx].outline_level = 0
+                            daily_summary_count += 1
+
+                        is_even = (daily_summary_count % 2 == 0) if not is_detail else False
+
                         for col_idx in range(1, 9):
                             cell = sheet.cell(row=row_idx, column=col_idx)
-                            
-                            # Визначаємо межі для поточної клітинки
-                            l_b = thin_side
-                            r_b = thin_side
-                            t_b = thin_side
-                            b_b = thin_side
-
-                            # Зовнішній контур всієї таблиці (Outline)
-                            if col_idx == 1:
-                                l_b = thick_side
-                            if col_idx == 8:
-                                r_b = thick_side
-                            if row_idx == 1:
-                                t_b = thick_side
-                            if row_idx == sheet.max_row:
-                                b_b = thick_side
-
-                            # Обведення всього рядка заголовків
-                            if row_idx == 1:
-                                b_b = thick_side
-
-                            # Колонки 'Дата' (ліва та права межі)
-                            if col_idx == 2:
-                                l_b = thick_side
-                                r_b = thick_side
-
-                            # Кожна з трьох колонок з різницями
-                            if col_idx in (6, 7, 8):
-                                l_b = thick_side
-                                r_b = thick_side
-
-                            # Жирні межі для РАЗОМ
-                            if is_rahom:
-                                t_b = thick_side
-                                b_b = thick_side
-                            
-                            cell.border = Border(left=l_b, right=r_b, top=t_b, bottom=b_b)
                             
                             if is_header:
                                 cell.font = font_header
                                 cell.alignment = align_center
                                 cell.fill = header_fill
+                                cell.border = Border(left=thick_side if col_idx == 1 else thin_side,
+                                                     right=thick_side if col_idx == 8 else thin_side,
+                                                     top=thick_side, bottom=thick_side)
+                            elif is_detail:
+                                cell.font = Font(size=10, italic=True, color="595959")
+                                cell.fill = no_fill
+                                cell.border = Border(left=thick_side if col_idx == 1 else light_grid_side,
+                                                     right=thick_side if col_idx == 8 else light_grid_side,
+                                                     top=light_grid_side, bottom=light_grid_side)
+                                if col_idx in (1, 2):
+                                    cell.alignment = align_left
+                                else:
+                                    cell.alignment = align_right
                             else:
-                                # Налаштування кольору фону (zebra)
+                                l_b = thick_side if col_idx in (1, 2, 6, 7, 8) else thin_side
+                                r_b = thick_side if col_idx in (2, 6, 7, 8) else thin_side
+                                t_b = thick_side if (is_rahom or row_idx == sheet.max_row) else thin_side
+                                b_b = thick_side if (is_rahom or row_idx == sheet.max_row) else thin_side
+
+                                cell.border = Border(left=l_b, right=r_b, top=t_b, bottom=b_b)
+                                
                                 if is_rahom:
                                     cell.fill = rahom_fill
-                                elif is_even:
-                                    cell.fill = zebra_fill
+                                    cell.font = Font(bold=True, italic=True, size=10, color="000000") if col_idx == 6 else Font(bold=True, size=11, color="000000")
                                 else:
-                                    cell.fill = no_fill
-                                        
-                                # Встановлення ієрархії шрифтів
-                                if is_rahom:
-                                    if col_idx == 6:
-                                        cell.font = Font(bold=True, italic=True, size=10, color="000000")
-                                    else:
-                                        cell.font = Font(bold=True, size=11, color="000000")
-                                else:
+                                    cell.fill = zebra_fill if is_even else no_fill
                                     cell.font = Font(size=11, color="000000")
 
                                 if col_idx in (1, 2):
-                                    if is_rahom:
-                                        cell.alignment = Alignment(horizontal="left", vertical="center")
-                                    else:
-                                        cell.alignment = Alignment(horizontal="center", vertical="center")
+                                    cell.alignment = align_left if is_rahom else align_center
                                 else:
-                                    cell.alignment = Alignment(horizontal="right", vertical="center")
+                                    cell.alignment = align_right
 
-                    sheet.sheet_properties.outlinePr.summaryBelow = True
+                    # Групуємо детальні рядки кожного дня
+                    curr_start = None
+                    for row_idx in range(2, sheet.max_row + 1):
+                        curr_val = str(sheet.cell(row=row_idx, column=2).value or '')
+                        is_det = curr_val.strip().startswith('↳') or curr_val.strip().startswith('   ↳')
+                        if is_det:
+                            if curr_start is None:
+                                curr_start = row_idx
+                        else:
+                            if curr_start is not None:
+                                sheet.row_dimensions.group(curr_start, row_idx - 1, outline_level=1, hidden=True)
+                                curr_start = None
+                    if curr_start is not None:
+                        sheet.row_dimensions.group(curr_start, sheet.max_row, outline_level=1, hidden=True)
+
                     sheet.freeze_panes = "A2"
                     sheet.auto_filter.ref = sheet.dimensions
 
@@ -770,8 +551,8 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                             header_val in (
                                 'Сума', COL_AMOUNT, 'Залишок', COL_BALANCE, 'План', 'Витрати', 
                                 'Дохід', 'Різниця за день', 'Різниця за місяць', 'Різниця загалом',
-                                'Оригінальна сума', 'Скомпенсовано', 'Залишок (Витрати)'
-                            ) or (sheet_name == 'Reconciliation_Audit' and col_idx in (4, 5, 6))
+                                'Оригінальна сума', 'Скомпенсовано', 'Залишок (Витрати)', 'Різниця (Комісія)'
+                            ) or (sheet_name == 'Reconciliation_Audit' and col_idx in (5, 9, 10))
                         )
                         try:
                             return f"{val:,.2f}" if is_fin else (f"{int(val)}" if val == int(val) else str(val))
@@ -813,10 +594,15 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                     sheet.column_dimensions[col_letter].width = col_width
 
                     # Налаштування форматів чисел
-                    start_r = 2
+                    start_r = 3 if sheet_name == 'Reconciliation_Audit' else 2
                     for row_idx in range(start_r, sheet.max_row + 1):
                         cell = sheet.cell(row=row_idx, column=col[0].column)
-                        if header_val in (COL_DATE, 'Дата', 'Дата зняття', 'Дата поповнення', 'Дата відправки/зняття', 'Дата отримання/поповнення'):
+                        if sheet_name == 'Reconciliation_Audit':
+                            if col_idx in (2, 6):
+                                cell.number_format = 'DD.MM.YYYY HH:mm:ss'
+                            elif col_idx in (5, 9, 10):
+                                cell.number_format = '#,##0.00 "грн."'
+                        elif header_val in (COL_DATE, 'Дата', 'Дата зняття', 'Дата поповнення', 'Дата відправки/зняття', 'Дата отримання/поповнення'):
                             cell.number_format = 'DD.MM.YYYY HH:mm:ss' if header_val not in ('Дата') or sheet_name != 'Daily_Dashboard' else 'DD.MM.YYYY'
                         elif header_val in (COL_AMOUNT, 'Сума зняття', 'Сума поповнення', 'Сума компенсації', 'Залишок зняття', 'Сума джерела', 'Сума отримувача', 'Залишок джерела'):
                             cell.number_format = '#,##0.00' if header_val != COL_AMOUNT else '[Color 10]#,##0.00;-#,##0.00;0.00'
