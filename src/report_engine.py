@@ -253,17 +253,7 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                     thin_grid_side = Side(style='thin', color="A6A6A6")
                     thick_border_side = Side(style='medium', color="000000")
                     zebra_fill = PatternFill(start_color="E9E9E9", end_color="E9E9E9", fill_type="solid")
-                    split_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
                     data_alignment = Alignment(vertical="center")
-
-                    # Отримуємо індекс стовпця ID для підсвічування розщеплених рядків
-                    id_col_idx = None
-                    if sheet_name in ('Expenses', 'Income', 'Total_Ledger'):
-                        for c_idx in range(1, sheet.max_column + 1):
-                            col_name = str(sheet.cell(row=1, column=c_idx).value or '').strip().lower()
-                            if 'id' in col_name or col_name == COL_ID.lower():
-                                id_col_idx = c_idx
-                                break
 
                     prev_period = None
                     group_start = 2
@@ -280,13 +270,6 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                                 sheet.row_dimensions.group(group_start + 1, row_idx - 1, outline_level=1)
                             group_start = row_idx
 
-                        # Безпечна перевірка суфіксів Twins-транзакцій та Clearing
-                        is_split_row = False
-                        if id_col_idx:
-                            val = str(sheet.cell(row=row_idx, column=id_col_idx).value or "")
-                            if val.endswith('_main') or val.endswith('_comm') or '_clear_' in val:
-                                is_split_row = True
-
                         for col_idx in range(1, sheet.max_column + 1):
                             cell = sheet.cell(row=row_idx, column=col_idx)
                             top_s = thick_border_side if (sheet_name == 'Total_Ledger' and is_new_period) else thin_grid_side
@@ -298,9 +281,7 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                             else:
                                 cell.alignment = data_alignment
                             
-                            if is_split_row:
-                                cell.fill = split_fill
-                            elif is_even:
+                            if is_even:
                                 cell.fill = zebra_fill
                         prev_period = curr_period
 
@@ -327,16 +308,16 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                         cell.border = header_border
 
                     # Стилі блоків
-                    parent_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+                    parent_fill = PatternFill(fill_type=None)
                     parent_font = Font(bold=True, size=11, color="000000")
 
-                    child_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+                    child_fill = PatternFill(fill_type=None)
                     child_font = Font(size=11, color="000000")
 
-                    summary_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+                    summary_fill = PatternFill(fill_type=None)
                     summary_font = Font(bold=True, size=11, color="000000")
 
-                    twins_fill = PatternFill(start_color="E6E6FA", end_color="E6E6FA", fill_type="solid")
+                    twins_fill = PatternFill(fill_type=None)
                     twins_font = Font(size=11, color="000000")
 
                     align_center = Alignment(horizontal="center", vertical="center")
