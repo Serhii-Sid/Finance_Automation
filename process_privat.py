@@ -174,7 +174,7 @@ def main():
         # Первинний незмінний реєстр транзакцій (для листа Total_Ledger)
         df_raw = df_final.copy()
 
-        # Зберігаємо леджер з 5 листами (Total_Ledger, Income, Reconciliation_Audit, Expenses, Daily_Dashboard)
+        # Зберігаємо леджер з 4 листами (Total_Ledger, Income, Expenses, Daily_Dashboard)
         save_final_ledger(df_raw, None, __file__)
 
         # --- Тестовий звіт у консоль ---

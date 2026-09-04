@@ -16,7 +16,6 @@ from src.finance_logic import (
     process_transit_vika,
     process_mono_investments,
     process_investment_transit_clearing,
-    ReconciliationRegistry
 )
 
 logger = logging.getLogger(__name__)
@@ -183,11 +182,11 @@ def rotate_outputs():
         os.replace(OUTPUT_FILE, os.path.join(OUTPUT_FOLDER, base_name.format(1)))
 
 def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, script_path: str = "", df_analytical: Optional[pd.DataFrame] = None):
-    """Зберігає фінальний Excel з 5 листами (Total_Ledger, Income, Reconciliation_Audit, Expenses, Daily_Dashboard)."""
+    """Зберігає фінальний Excel з 4 листами (Total_Ledger, Income, Expenses, Daily_Dashboard)."""
     try:
         rotate_outputs()
 
-        from src.finance_logic import detect_internal_transfers, process_cash_clearing, ReconciliationRegistry
+        from src.finance_logic import detect_internal_transfers, process_cash_clearing
 
         # 1. Сирий недоторканий DataFrame для листа 'Total_Ledger'
         df_export = df.copy()
@@ -200,7 +199,7 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
         }
         df_export.insert(2, 'Місяць', df_export[COL_DATE].dt.month.map(ukr_months) + " " + df_export[COL_DATE].dt.year.astype(str))
         
-        # 2. Формування df_analytical та збір аудиторського реєстру ReconciliationRegistry
+        # 2. Формування df_analytical
         if df_analytical is None:
             df_analytical = detect_internal_transfers(df.copy())
             df_analytical = process_transit_vika(df_analytical)
@@ -231,23 +230,16 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
         df_income = df_income[income_cols]
         df_expenses = df_expenses[expenses_cols]
 
-        # Заготовка порожньої структури для Reconciliation_Audit
-        df_audit_header = pd.DataFrame(columns=[
-            'Дата', 'Операція / ID', 'Картка / Опис',
-            'Оригінальна сума', 'Скомпенсовано', 'Залишок (Витрати)', 'Деталі звірки'
-        ])
-
-        # Запис п'яти листів у суворо визначеному порядку:
-        # 1. Total_Ledger, 2. Income, 3. Expenses, 4. Reconciliation_Audit, 5. Daily_Dashboard
+        # Запис чотирьох листів у суворо визначеному порядку:
+        # 1. Total_Ledger, 2. Income, 3. Expenses, 4. Daily_Dashboard
         with pd.ExcelWriter(OUTPUT_FILE, engine='openpyxl', datetime_format='dd.mm.yyyy hh:mm:ss') as writer:
             df_export.to_excel(writer, index=False, sheet_name='Total_Ledger')
             df_income.to_excel(writer, index=False, sheet_name='Income')
             df_expenses.to_excel(writer, index=False, sheet_name='Expenses')
-            df_audit_header.to_excel(writer, index=False, sheet_name='Reconciliation_Audit')
             df_dash.to_excel(writer, index=False, sheet_name='Daily_Dashboard')
 
             # Стилізація листів
-            for sheet_name in ['Total_Ledger', 'Income', 'Expenses', 'Reconciliation_Audit', 'Daily_Dashboard']:
+            for sheet_name in ['Total_Ledger', 'Income', 'Expenses', 'Daily_Dashboard']:
                 sheet = writer.sheets[sheet_name]
                 sheet.views.sheetView[0].showGridLines = True
                 
@@ -309,133 +301,6 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
 
                     sheet.freeze_panes = "A2"
                     sheet.auto_filter.ref = sheet.dimensions
-
-                elif sheet_name == 'Reconciliation_Audit':
-                    # --- Карта компенсацій (Reconciliation Dashboard) ---
-                    sheet.row_dimensions[1].height = 24
-                    sheet.row_dimensions[2].height = 24
-
-                    header_fill_audit = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
-                    header_font_audit = Font(bold=True, color="FFFFFF", size=11)
-                    header_alignment = Alignment(horizontal="center", vertical="center")
-                    thin_grid_side = Side(style='thin', color="A6A6A6")
-                    thick_grid_side = Side(style='medium', color="000000")
-                    header_border = Border(left=thin_grid_side, right=thin_grid_side, top=thin_grid_side, bottom=thin_grid_side)
-
-                    # Заголовки першого рівня (Групування)
-                    sheet.merge_cells('A1:A2')
-                    sheet.cell(row=1, column=1, value="Тип клірингу")
-
-                    sheet.merge_cells('B1:E1')
-                    sheet.cell(row=1, column=2, value="ДЖЕРЕЛО (ОРИГІНАЛЬНА ОПЕРАЦІЯ)")
-
-                    sheet.merge_cells('F1:I1')
-                    sheet.cell(row=1, column=6, value="КОМПЕНСАЦІЯ (ЗІСТАВЛЕНА ОПЕРАЦІЯ)")
-
-                    sheet.merge_cells('J1:J2')
-                    sheet.cell(row=1, column=10, value="Різниця (Комісія)")
-
-                    # Заголовки другого рівня
-                    headers_r2 = {
-                        2: "Дата", 3: "Картка", 4: "Опис", 5: "Сума",
-                        6: "Дата", 7: "Картка", 8: "Опис", 9: "Сума"
-                    }
-                    for c_idx, text in headers_r2.items():
-                        sheet.cell(row=2, column=c_idx, value=text)
-
-                    # Стилізація заголовків (Row 1 & Row 2)
-                    for r_idx in (1, 2):
-                        for c_idx in range(1, 11):
-                            cell = sheet.cell(row=r_idx, column=c_idx)
-                            cell.font = header_font_audit
-                            cell.fill = header_fill_audit
-                            cell.alignment = header_alignment
-                            cell.border = header_border
-
-                    # Отримуємо реєстр збережених компенсацій
-                    df_audit_data = ReconciliationRegistry.get_df()
-
-                    align_center = Alignment(horizontal="center", vertical="center")
-                    align_left = Alignment(horizontal="left", vertical="center")
-                    align_right = Alignment(horizontal="right", vertical="center")
-
-                    zebra_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
-                    no_fill = PatternFill(fill_type=None)
-
-                    current_row = 3
-                    if not df_audit_data.empty:
-                        for pair_idx, row in df_audit_data.iterrows():
-                            clear_type_raw = str(row.get('Тип компенсації', '') or '')
-                            if 'Cash' in clear_type_raw or 'Готівка' in clear_type_raw:
-                                clear_type = 'Готівка'
-                            elif 'Transit' in clear_type_raw or 'Віка' in clear_type_raw:
-                                clear_type = 'Транзит Віка'
-                            elif 'Twins' in clear_type_raw or 'Картка' in clear_type_raw:
-                                clear_type = 'Внутрішній переказ'
-                            else:
-                                clear_type = clear_type_raw
-
-                            date_src = row.get('Дата зняття')
-                            card_src = str(row.get('Картка джерела', '') or row.get('Опис зняття', '')).strip()
-                            desc_src = str(row.get('Опис зняття', '') or '')
-                            amt_src = abs(float(row.get('Сума зняття', 0.0) or 0.0))
-
-                            date_dst = row.get('Дата поповнення')
-                            card_dst = str(row.get('Картка отримувача', '') or row.get('Опис поповнення', '')).strip()
-                            desc_dst = str(row.get('Опис поповнення', '') or '')
-                            cleared_amt = float(row.get('Сума компенсації', 0.0) or 0.0)
-
-                            # Для транзиту Віки джерелом є прихід від Віки (date_right), а компенсацією є інвестиція (date_left)
-                            if clear_type == 'Транзит Віка':
-                                date_src, date_dst = date_dst, date_src
-                                card_src, card_dst = card_dst, card_src
-                                desc_src, desc_dst = desc_dst, desc_src
-                                amt_src = float(row.get('Сума поповнення', 0.0) or 0.0)
-
-                            delta = round(amt_src - cleared_amt, 2)
-                            if abs(delta) < 1e-5:
-                                delta = 0.00
-
-                            vals = [
-                                clear_type,
-                                date_src,
-                                card_src,
-                                desc_src,
-                                amt_src,
-                                date_dst,
-                                card_dst,
-                                desc_dst,
-                                cleared_amt,
-                                delta
-                            ]
-
-                            is_even = (pair_idx % 2 == 0)
-                            row_fill = zebra_fill if is_even else no_fill
-
-                            sheet.row_dimensions[current_row].height = 22
-                            for c_idx, val in enumerate(vals, 1):
-                                cell = sheet.cell(row=current_row, column=c_idx, value=val)
-                                cell.fill = row_fill
-
-                                l_side = thick_grid_side if c_idx in (1, 2, 6, 10) else thin_grid_side
-                                r_side = thick_grid_side if c_idx in (1, 5, 9, 10) else thin_grid_side
-                                cell.border = Border(left=l_side, right=r_side, top=thin_grid_side, bottom=thin_grid_side)
-
-                                if c_idx in (1, 2, 6):
-                                    cell.alignment = align_center
-                                    if c_idx in (2, 6) and isinstance(val, (datetime.datetime, pd.Timestamp)):
-                                        cell.number_format = 'DD.MM.YYYY HH:mm:ss'
-                                elif c_idx in (5, 9, 10):
-                                    cell.alignment = align_right
-                                    cell.number_format = '#,##0.00 "грн."'
-                                else:
-                                    cell.alignment = align_left
-
-                            current_row += 1
-
-                    sheet.freeze_panes = "A3"
-                    if sheet.max_row >= 2 and sheet.max_column >= 1:
-                        sheet.auto_filter.ref = f"A2:J{sheet.max_row}"
 
                 else:
                     # Стилізація Daily_Dashboard
@@ -565,9 +430,8 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                         is_fin = (
                             header_val in (
                                 'Сума', COL_AMOUNT, 'Залишок', COL_BALANCE, 'План', 'Витрати', 
-                                'Дохід', 'Різниця за день', 'Різниця за місяць', 'Різниця загалом',
-                                'Оригінальна сума', 'Скомпенсовано', 'Залишок (Витрати)', 'Різниця (Комісія)'
-                            ) or (sheet_name == 'Reconciliation_Audit' and col_idx in (5, 9, 10))
+                                'Дохід', 'Різниця за день', 'Різниця за місяць', 'Різниця загалом'
+                            )
                         )
                         try:
                             return f"{val:,.2f}" if is_fin else (f"{int(val)}" if val == int(val) else str(val))
@@ -609,15 +473,9 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                     sheet.column_dimensions[col_letter].width = col_width
 
                     # Налаштування форматів чисел
-                    start_r = 3 if sheet_name == 'Reconciliation_Audit' else 2
-                    for row_idx in range(start_r, sheet.max_row + 1):
+                    for row_idx in range(2, sheet.max_row + 1):
                         cell = sheet.cell(row=row_idx, column=col[0].column)
-                        if sheet_name == 'Reconciliation_Audit':
-                            if col_idx in (2, 6):
-                                cell.number_format = 'DD.MM.YYYY HH:mm:ss'
-                            elif col_idx in (5, 9, 10):
-                                cell.number_format = '#,##0.00 "грн."'
-                        elif header_val in (COL_DATE, 'Дата', 'Дата зняття', 'Дата поповнення', 'Дата відправки/зняття', 'Дата отримання/поповнення'):
+                        if header_val in (COL_DATE, 'Дата', 'Дата зняття', 'Дата поповнення', 'Дата відправки/зняття', 'Дата отримання/поповнення'):
                             cell.number_format = 'DD.MM.YYYY HH:mm:ss' if header_val not in ('Дата') or sheet_name != 'Daily_Dashboard' else 'DD.MM.YYYY'
                         elif header_val in (COL_AMOUNT, 'Сума зняття', 'Сума поповнення', 'Сума компенсації', 'Залишок зняття', 'Сума джерела', 'Сума отримувача', 'Залишок джерела'):
                             cell.number_format = '#,##0.00' if header_val != COL_AMOUNT else '[Color 10]#,##0.00;-#,##0.00;0.00'
