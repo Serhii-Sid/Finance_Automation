@@ -333,6 +333,8 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                         elif is_detail:
                             sheet.row_dimensions[row_idx].outline_level = 1
                             sheet.row_dimensions[row_idx].hidden = True
+                            # Автоматична висота рядка під об'єм тексту
+                            sheet.row_dimensions[row_idx].height = None
                             # Об'єднуємо комірки A та B (стовпчики "Місяць" та "Дата") для детального рядка
                             sheet.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=2)
                         else:
@@ -366,7 +368,7 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                                                      right=thick_side if col_idx == 8 else light_grid_side,
                                                      top=light_grid_side, bottom=light_grid_side)
                                 if col_idx in (1, 2):
-                                    cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+                                    cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
                                 else:
                                     cell.alignment = align_right
                             else:

@@ -17,13 +17,7 @@ from config import (
 
 # --- Імпорт модулів-парсерів ---
 from parsers.base_parser import BaseParser
-from parsers import (
-    PrivatParser, 
-    AbankParser, 
-    AllianceParser, 
-    PumbParser, 
-    MonoParser
-)
+from parsers import PrivatParser
 from src.data_manager import standardize_df, clean_and_transform, reconcile_and_merge
 from src.finance_logic import (
     apply_bank_specific_post_processing,
