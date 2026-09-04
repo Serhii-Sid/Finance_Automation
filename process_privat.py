@@ -1,21 +1,18 @@
 # --- Стандартні модулі Python ---
 import os
 import glob
-import re
 import logging
-import hashlib
 import shutil
 import warnings
-from typing import Optional, List
+from typing import Optional
 
 # --- Сторонні бібліотеки ---
 import pandas as pd
 
 # --- Налаштування проекту (Конфігурація) ---
 from config import (
-    BASE_DIR, INPUT_FOLDER, OUTPUT_FOLDER, ARCHIVE_FOLDER, OUTPUT_FILE, LOG_FILE,
-    COL_ID, COL_DATE, COL_CAT, COL_CARD, COL_DESC, COL_AMOUNT, COL_BALANCE, COL_MCC,
-    USEFUL_COLUMNS, CARDS_DICTIONARY, IBAN_TO_CARD_MAP, MCC_MAP, EXCEL_MAPPING
+    INPUT_FOLDER, OUTPUT_FOLDER, ARCHIVE_FOLDER, OUTPUT_FILE, LOG_FILE,
+    COL_ID, COL_DATE, COL_CARD, USEFUL_COLUMNS
 )
 
 # --- Імпорт модулів-парсерів ---
@@ -31,11 +28,10 @@ from src.data_manager import standardize_df, clean_and_transform, reconcile_and_
 from src.finance_logic import (
     apply_bank_specific_post_processing,
     detect_internal_transfers,
-    process_cash_clearing,
     process_transit_vika,
     process_mono_investments
 )
-from src.report_engine import save_final_ledger, generate_daily_dashboard
+from src.report_engine import save_final_ledger
 
 # --- Налаштування логування ---
 logging.basicConfig(
@@ -60,7 +56,7 @@ def initialize_environment():
 
     
     # --- Формуємо список цільових папок для ініціалізації ---
-    folders = [INPUT_FOLDER, OUTPUT_FOLDER, ARCHIVE_FOLDER,]    
+    folders = [INPUT_FOLDER, OUTPUT_FOLDER, ARCHIVE_FOLDER]    
     
     # --- Цикл перевірки та створення папок ---
     for folder in folders:
@@ -175,16 +171,16 @@ def main():
         df_raw = df_final.copy()
 
         # Зберігаємо леджер з 4 листами (Total_Ledger, Income, Expenses, Daily_Dashboard)
-        save_final_ledger(df_raw, None, __file__)
+        save_final_ledger(df_raw)
 
-        # --- Тестовий звіт у консоль ---
-        print("\n" + "="*40)
-        print("[ЗВІТ] ТЕСТОВИЙ ЗВІТ ПО НОВИХ ДАНИХ")
+        # --- Звіт у лог ---
+        logger.info("=" * 40)
+        logger.info("[ЗВІТ] ТЕСТОВИЙ ЗВІТ ПО НОВИХ ДАНИХ")
         if all_dfs:
-            print(new_data.groupby(COL_CARD).size().reset_index(name='Кількість транзакцій').to_string(index=False))
+            logger.info("\n" + new_data.groupby(COL_CARD).size().reset_index(name='Кількість транзакцій').to_string(index=False))
         else:
-            print("Базу оновлено згідно з останніми правилами категоризації (без нових файлів).")
-        print("="*40 + "\n")
+            logger.info("Базу оновлено згідно з останніми правилами категоризації (без нових файлів).")
+        logger.info("=" * 40)
 
     else:
         logger.info("Нових даних не виявлено.")

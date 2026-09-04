@@ -46,9 +46,6 @@ def generate_daily_dashboard(df_ledger: pd.DataFrame) -> pd.DataFrame:
     df_exp_grouped = df[expenses_mask].groupby('Дата_Норм')[COL_AMOUNT].sum()
     df_inc_grouped = df[income_mask].groupby('Дата_Норм')[COL_AMOUNT].sum()
     
-    df_expenses_details = df[expenses_mask].copy()
-    df_income_details = df[income_mask].copy()
-    
     month_income_totals = {}
     for (yr, mn), group in df[income_mask].groupby([df[COL_DATE].dt.year, df[COL_DATE].dt.month]):
         month_income_totals[(yr, mn)] = group[COL_AMOUNT].sum()
@@ -181,7 +178,7 @@ def rotate_outputs():
     if os.path.exists(OUTPUT_FILE): 
         os.replace(OUTPUT_FILE, os.path.join(OUTPUT_FOLDER, base_name.format(1)))
 
-def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, script_path: str = "", df_analytical: Optional[pd.DataFrame] = None):
+def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, df_analytical: Optional[pd.DataFrame] = None):
     """Зберігає фінальний Excel з 4 листами (Total_Ledger, Income, Expenses, Daily_Dashboard)."""
     try:
         rotate_outputs()

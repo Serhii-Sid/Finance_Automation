@@ -5,7 +5,7 @@ from src.text_utils import _normalize_text, REGEX_CAT_CLEAN
 from src.finance_logic import classify_transfer, get_category_by_mcc, make_short_id_vectorized
 from config import (
     COL_ID, COL_DATE, COL_CAT, COL_CARD, COL_DESC, COL_AMOUNT, COL_BALANCE, COL_MCC, COL_CLEARING_STATUS,
-    IBAN_TO_CARD_MAP, CARDS_DICTIONARY, USEFUL_COLUMNS,
+    CARDS_DICTIONARY, USEFUL_COLUMNS,
     MCC_MAP, CATEGORIES_KEYWORDS, INCOME_CATEGORIES, EXPENSES_CATEGORIES, AMBIGUOUS_CATEGORIES
 )
 
@@ -22,6 +22,8 @@ ALLOWED_CATEGORIES = {
     'бонуси та кешбек', 'зарплата і виплати', 'інші надходження', 
     'переказ з власного рахунку', 'переказ з чужого рахунку', 'поповнення готівкою', 'транзит Віка'
 }
+
+FINAL_CATEGORIES = set(MCC_MAP.keys()) | set(CATEGORIES_KEYWORDS.keys()) | set(INCOME_CATEGORIES) | set(EXPENSES_CATEGORIES)
 
 def standardize_df(df: pd.DataFrame) -> pd.DataFrame:
     """Приведення DataFrame до єдиного стандарту колонок."""
@@ -213,15 +215,10 @@ def clean_and_transform(df: pd.DataFrame) -> pd.DataFrame:
         # Записуємо фінальний результат назад у DataFrame
         df[COL_CAT] = final_cat
 
-        # Визначаємо набір усіх дозволених категорій (білий список)
-        # Використовуємо .keys(), бо тепер назви категорій — це КЛЮЧІ в MCC_MAP
-        final_categories = set(MCC_MAP.keys()) | set(CATEGORIES_KEYWORDS.keys()) | \
-                           set(INCOME_CATEGORIES) | set(EXPENSES_CATEGORIES)
-
         # --- Додатковий крок: Bank Remapping (Очищення/перейменування категорій банку) ---
         for cat, keywords in CATEGORIES_KEYWORDS.items():
             for kw in keywords:
-                is_not_standardized = ~df[COL_CAT].isin(final_categories) | df[COL_CAT].isin(AMBIGUOUS_CATEGORIES)
+                is_not_standardized = ~df[COL_CAT].isin(FINAL_CATEGORIES) | df[COL_CAT].isin(AMBIGUOUS_CATEGORIES)
                 mask = is_not_standardized & \
                        df[COL_CAT].astype(str).str.contains(kw, case=False, na=False, regex=False) & \
                        (~df[COL_CAT].astype(str).str.contains('власний рахунок', na=False))
