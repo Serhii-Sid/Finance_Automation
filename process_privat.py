@@ -1,5 +1,6 @@
 # --- Стандартні модулі Python ---
 import os
+import sys
 import glob
 import logging
 import shutil
@@ -12,7 +13,7 @@ import pandas as pd
 # --- Налаштування проекту (Конфігурація) ---
 from config import (
     INPUT_FOLDER, OUTPUT_FOLDER, ARCHIVE_FOLDER, OUTPUT_FILE, LOG_FILE,
-    COL_ID, COL_DATE, COL_CARD, USEFUL_COLUMNS
+    COL_ID, COL_DATE, COL_CARD, USEFUL_COLUMNS, REBUILD_MODE
 )
 
 # --- Імпорт модулів-парсерів ---
@@ -96,13 +97,22 @@ def load_bank_file(file_path: str) -> Optional[pd.DataFrame]:
 
 def main():
     initialize_environment()
-    found_files = glob.glob(os.path.join(INPUT_FOLDER, '*.xlsx')) + glob.glob(os.path.join(INPUT_FOLDER, '*.pdf'))
+    all_entries = glob.glob(os.path.join(INPUT_FOLDER, '*.xlsx')) + glob.glob(os.path.join(INPUT_FOLDER, '*.pdf'))
+    found_files = [f for f in all_entries if os.path.isfile(f) and not os.path.basename(f).startswith('~$')]
+
+    # Визначаємо режим роботи (з config.py або з командного рядка --rebuild)
+    is_rebuild = REBUILD_MODE or ('--rebuild' in sys.argv)
 
     # Читаємо базу без примусового перетворення на str, щоб зберегти об'єкти дати
-    if os.path.exists(OUTPUT_FILE):
-        df_base = pd.read_excel(OUTPUT_FILE, dtype={COL_ID: str}, parse_dates=[COL_DATE])
+    if not is_rebuild and os.path.exists(OUTPUT_FILE):
+        logger.info(f"Режим запуску: Щоденний дозапис (is_rebuild={is_rebuild}). Завантажуємо існуючу базу з {os.path.basename(OUTPUT_FILE)}")
+        df_base = pd.read_excel(OUTPUT_FILE, sheet_name='Total_Ledger', dtype={COL_ID: str}, parse_dates=[COL_DATE])
         df_base = standardize_df(df_base)  # Автоматично перейменує колонки в старій базі
     else:
+        if is_rebuild:
+            logger.info(f"Режим запуску: Повний перезапис (is_rebuild={is_rebuild}). Існуюча база буде ігноруватись.")
+        else:
+            logger.info(f"Базу {os.path.basename(OUTPUT_FILE)} не знайдено. Ініціалізація порожнього реєстру.")
         df_base = pd.DataFrame()
 
     all_dfs = []

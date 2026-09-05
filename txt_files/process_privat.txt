@@ -1,35 +1,32 @@
 # --- Стандартні модулі Python ---
 import os
+import sys
 import glob
-import re
 import logging
-import hashlib
 import shutil
 import warnings
-from typing import Optional, List
+from typing import Optional
 
 # --- Сторонні бібліотеки ---
 import pandas as pd
 
 # --- Налаштування проекту (Конфігурація) ---
 from config import (
-    BASE_DIR, INPUT_FOLDER, OUTPUT_FOLDER, ARCHIVE_FOLDER, OUTPUT_FILE, LOG_FILE,
-    COL_ID, COL_DATE, COL_CAT, COL_CARD, COL_DESC, COL_AMOUNT, COL_BALANCE, COL_MCC,
-    USEFUL_COLUMNS, CARDS_DICTIONARY, IBAN_TO_CARD_MAP, MCC_MAP, EXCEL_MAPPING
+    INPUT_FOLDER, OUTPUT_FOLDER, ARCHIVE_FOLDER, OUTPUT_FILE, LOG_FILE,
+    COL_ID, COL_DATE, COL_CARD, USEFUL_COLUMNS, REBUILD_MODE
 )
 
 # --- Імпорт модулів-парсерів ---
 from parsers.base_parser import BaseParser
-from parsers import (
-    PrivatParser, 
-    AbankParser, 
-    AllianceParser, 
-    PumbParser, 
-    MonoParser
+from parsers import PrivatParser
+from src.data_manager import standardize_df, clean_and_transform, reconcile_and_merge
+from src.finance_logic import (
+    apply_bank_specific_post_processing,
+    detect_internal_transfers,
+    process_transit_vika,
+    process_mono_investments
 )
-from data_manager import standardize_df, clean_and_transform, reconcile_and_merge
-from finance_logic import apply_bank_specific_post_processing, detect_internal_transfers, process_cash_clearing
-from report_engine import save_final_ledger, generate_daily_dashboard
+from src.report_engine import save_final_ledger
 
 # --- Налаштування логування ---
 logging.basicConfig(
@@ -54,7 +51,7 @@ def initialize_environment():
 
     
     # --- Формуємо список цільових папок для ініціалізації ---
-    folders = [INPUT_FOLDER, OUTPUT_FOLDER, ARCHIVE_FOLDER,]    
+    folders = [INPUT_FOLDER, OUTPUT_FOLDER, ARCHIVE_FOLDER]    
     
     # --- Цикл перевірки та створення папок ---
     for folder in folders:
@@ -100,13 +97,22 @@ def load_bank_file(file_path: str) -> Optional[pd.DataFrame]:
 
 def main():
     initialize_environment()
-    found_files = glob.glob(os.path.join(INPUT_FOLDER, '*.xlsx')) + glob.glob(os.path.join(INPUT_FOLDER, '*.pdf'))
+    all_entries = glob.glob(os.path.join(INPUT_FOLDER, '*.xlsx')) + glob.glob(os.path.join(INPUT_FOLDER, '*.pdf'))
+    found_files = [f for f in all_entries if os.path.isfile(f) and not os.path.basename(f).startswith('~$')]
+
+    # Визначаємо режим роботи (з config.py або з командного рядка --rebuild)
+    is_rebuild = REBUILD_MODE or ('--rebuild' in sys.argv)
 
     # Читаємо базу без примусового перетворення на str, щоб зберегти об'єкти дати
-    if os.path.exists(OUTPUT_FILE):
-        df_base = pd.read_excel(OUTPUT_FILE, dtype={COL_ID: str}, parse_dates=[COL_DATE])
+    if not is_rebuild and os.path.exists(OUTPUT_FILE):
+        logger.info(f"Режим запуску: Щоденний дозапис (is_rebuild={is_rebuild}). Завантажуємо існуючу базу з {os.path.basename(OUTPUT_FILE)}")
+        df_base = pd.read_excel(OUTPUT_FILE, sheet_name='Total_Ledger', dtype={COL_ID: str}, parse_dates=[COL_DATE])
         df_base = standardize_df(df_base)  # Автоматично перейменує колонки в старій базі
     else:
+        if is_rebuild:
+            logger.info(f"Режим запуску: Повний перезапис (is_rebuild={is_rebuild}). Існуюча база буде ігноруватись.")
+        else:
+            logger.info(f"Базу {os.path.basename(OUTPUT_FILE)} не знайдено. Ініціалізація порожнього реєстру.")
         df_base = pd.DataFrame()
 
     all_dfs = []
@@ -156,23 +162,29 @@ def main():
         # Застосовуємо оновлену категоризацію до всієї бази
         df_final = clean_and_transform(df_final)
 
-        # Визначаємо внутрішні перекази між власними рахунками
+        # Виявлення внутрішніх переказів (detect_internal_transfers) — НАЙВИЩИЙ ПРІОРИТЕТ
         df_final = detect_internal_transfers(df_final)
 
-        # Інтелектуальна компенсація готівкових потоків
-        df_final = process_cash_clearing(df_final)
+        # Маркування прихідних транзакцій від Віки
+        df_final = process_transit_vika(df_final)
 
-        df_dash = generate_daily_dashboard(df_final)
-        save_final_ledger(df_final, df_dash, __file__)
+        # Маркування інвестиційних витрат для картки Monobank
+        df_final = process_mono_investments(df_final)
 
-        # --- Тестовий звіт у консоль ---
-        print("\n" + "="*40)
-        print("[ЗВІТ] ТЕСТОВИЙ ЗВІТ ПО НОВИХ ДАНИХ")
+        # Первинний незмінний реєстр транзакцій (для листа Total_Ledger)
+        df_raw = df_final.copy()
+
+        # Зберігаємо леджер з 4 листами (Total_Ledger, Income, Expenses, Daily_Dashboard)
+        save_final_ledger(df_raw)
+
+        # --- Звіт у лог ---
+        logger.info("=" * 40)
+        logger.info("[ЗВІТ] ТЕСТОВИЙ ЗВІТ ПО НОВИХ ДАНИХ")
         if all_dfs:
-            print(new_data.groupby(COL_CARD).size().reset_index(name='Кількість транзакцій').to_string(index=False))
+            logger.info("\n" + new_data.groupby(COL_CARD).size().reset_index(name='Кількість транзакцій').to_string(index=False))
         else:
-            print("Базу оновлено згідно з останніми правилами категоризації (без нових файлів).")
-        print("="*40 + "\n")
+            logger.info("Базу оновлено згідно з останніми правилами категоризації (без нових файлів).")
+        logger.info("=" * 40)
 
     else:
         logger.info("Нових даних не виявлено.")

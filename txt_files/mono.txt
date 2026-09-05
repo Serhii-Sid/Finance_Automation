@@ -2,7 +2,6 @@ import re
 import pandas as pd
 import logging
 import pdfplumber
-from typing import Optional
 from config import COL_DATE, COL_DESC, COL_AMOUNT, COL_BALANCE, COL_MCC
 from parsers.base_parser import BaseParser
 

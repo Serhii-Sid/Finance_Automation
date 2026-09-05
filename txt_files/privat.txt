@@ -3,7 +3,7 @@ import pandas as pd
 import logging
 from typing import Optional
 from config import EXCEL_MAPPING
-from text_utils import detect_account_identity
+from src.text_utils import detect_account_identity
 from parsers.base_parser import BaseParser
 
 logger = logging.getLogger(__name__)

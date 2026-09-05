@@ -176,7 +176,8 @@ def rotate_outputs():
         new_v = os.path.join(OUTPUT_FOLDER, base_name.format(i+1))
         if os.path.exists(old_v): os.replace(old_v, new_v)
     if os.path.exists(OUTPUT_FILE): 
-        os.replace(OUTPUT_FILE, os.path.join(OUTPUT_FOLDER, base_name.format(1)))
+        import shutil
+        shutil.copyfile(OUTPUT_FILE, os.path.join(OUTPUT_FOLDER, base_name.format(1)))
 
 def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, df_analytical: Optional[pd.DataFrame] = None):
     """Зберігає фінальний Excel з 4 листами (Total_Ledger, Income, Expenses, Daily_Dashboard)."""
@@ -227,9 +228,16 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
         df_income = df_income[income_cols]
         df_expenses = df_expenses[expenses_cols]
 
-        # Запис чотирьох листів у суворо визначеному порядку:
-        # 1. Total_Ledger, 2. Income, 3. Expenses, 4. Daily_Dashboard
-        with pd.ExcelWriter(OUTPUT_FILE, engine='openpyxl', datetime_format='dd.mm.yyyy hh:mm:ss') as writer:
+        # Запис чотирьох листів у суворо визначеному порядку без стирання інших вкладок
+        writer_kwargs = {
+            'engine': 'openpyxl',
+            'datetime_format': 'dd.mm.yyyy hh:mm:ss'
+        }
+        if os.path.exists(OUTPUT_FILE):
+            writer_kwargs['mode'] = 'a'
+            writer_kwargs['if_sheet_exists'] = 'replace'
+
+        with pd.ExcelWriter(OUTPUT_FILE, **writer_kwargs) as writer:
             df_export.to_excel(writer, index=False, sheet_name='Total_Ledger')
             df_income.to_excel(writer, index=False, sheet_name='Income')
             df_expenses.to_excel(writer, index=False, sheet_name='Expenses')

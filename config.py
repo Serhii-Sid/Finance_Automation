@@ -8,6 +8,9 @@ ARCHIVE_FOLDER = os.path.join(INPUT_FOLDER, 'processed_archive')
 OUTPUT_FILE = os.path.join(OUTPUT_FOLDER, 'Total_Ledger.xlsx')
 LOG_FILE = os.path.join(BASE_DIR, 'automation.log')
 
+# --- Режим роботи ---
+REBUILD_MODE = False  # False — щоденний дозапис, True — повний перезапис
+
 # --- Константи назв колонок ---
 COL_ID = 'ID_Транзакції'
 COL_DATE = 'Дата'
