@@ -209,6 +209,9 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
         if df_dash is None or df_dash.empty:
             df_dash = generate_daily_dashboard(df_analytical)
 
+        # 3.1. Технічний дашборд без підсумкових рядків "РАЗОМ" (для зведених таблиць та візуалізацій)
+        df_dash_data = df_dash[~df_dash['Дата'].astype(str).str.startswith('РАЗОМ')].copy()
+
         # 4. Підготовка експорту для вкладок Income та Expenses
         df_analytical_processed = expand_commission_splits_for_reports(df_analytical)
         df_analytical_export = df_analytical_processed.copy()
@@ -228,7 +231,7 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
         df_income = df_income[income_cols]
         df_expenses = df_expenses[expenses_cols]
 
-        # Запис чотирьох листів у суворо визначеному порядку без стирання інших вкладок
+        # Запис п'яти листів у суворо визначеному порядку без стирання інших вкладок
         writer_kwargs = {
             'engine': 'openpyxl',
             'datetime_format': 'dd.mm.yyyy hh:mm:ss'
@@ -242,9 +245,10 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
             df_income.to_excel(writer, index=False, sheet_name='Income')
             df_expenses.to_excel(writer, index=False, sheet_name='Expenses')
             df_dash.to_excel(writer, index=False, sheet_name='Daily_Dashboard')
+            df_dash_data.to_excel(writer, index=False, sheet_name='Daily_Dashboard_Data')
 
             # Стилізація листів
-            for sheet_name in ['Total_Ledger', 'Income', 'Expenses', 'Daily_Dashboard']:
+            for sheet_name in ['Total_Ledger', 'Income', 'Expenses', 'Daily_Dashboard', 'Daily_Dashboard_Data']:
                 sheet = writer.sheets[sheet_name]
                 sheet.views.sheetView[0].showGridLines = True
                 
