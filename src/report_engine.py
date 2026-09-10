@@ -104,7 +104,7 @@ def generate_daily_dashboard(df_ledger: pd.DataFrame) -> pd.DataFrame:
             # 1. Щоденний підсумковий рядок (Level 0)
             summary_dict = {
                 'Місяць': row['Місяць'],
-                'Дата': dt.strftime('%d.%m.%Y'),
+                'Дата': dt.date(),
                 'План': row['План'],
                 'Витрати': row['Витрати'],
                 'Дохід': row['Дохід'],
@@ -130,7 +130,7 @@ def generate_daily_dashboard(df_ledger: pd.DataFrame) -> pd.DataFrame:
                     
                     detail_dict = {
                         'Місяць': f"{prefix}[{card}] {cat}: {desc}",
-                        'Дата': '',
+                        'Дата': None,
                         'План': None,
                         'Витрати': amt if amt < 0 else None,
                         'Дохід': amt if amt > 0 else None,
@@ -209,8 +209,9 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
         if df_dash is None or df_dash.empty:
             df_dash = generate_daily_dashboard(df_analytical)
 
-        # 3.1. Технічний дашборд без підсумкових рядків "РАЗОМ" (для зведених таблиць та візуалізацій)
-        df_dash_data = df_dash[~df_dash['Дата'].astype(str).str.startswith('РАЗОМ')].copy()
+        # 3.1. Плоский технічний дашборд по днях (без детальних підрядків та місячних підсумків РАЗОМ)
+        df_dash_data = df_dash[df_dash['Дата'].notna() & ~df_dash['Дата'].astype(str).str.startswith('РАЗОМ')].copy()
+        df_dash_data['Дата'] = pd.to_datetime(df_dash_data['Дата'], errors='coerce')
 
         # 4. Підготовка експорту для вкладок Income та Expenses
         df_analytical_processed = expand_commission_splits_for_reports(df_analytical)
@@ -486,8 +487,10 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                     # Налаштування форматів чисел
                     for row_idx in range(2, sheet.max_row + 1):
                         cell = sheet.cell(row=row_idx, column=col[0].column)
-                        if header_val in (COL_DATE, 'Дата', 'Дата зняття', 'Дата поповнення', 'Дата відправки/зняття', 'Дата отримання/поповнення'):
-                            cell.number_format = 'DD.MM.YYYY HH:mm:ss' if header_val not in ('Дата') or sheet_name != 'Daily_Dashboard' else 'DD.MM.YYYY'
+                        if header_val == 'Дата':
+                            cell.number_format = 'DD.MM.YYYY'
+                        elif header_val in (COL_DATE, 'Дата зняття', 'Дата поповнення', 'Дата відправки/зняття', 'Дата отримання/поповнення'):
+                            cell.number_format = 'DD.MM.YYYY HH:mm:ss'
                         elif header_val in (COL_AMOUNT, 'Сума зняття', 'Сума поповнення', 'Сума компенсації', 'Залишок зняття', 'Сума джерела', 'Сума отримувача', 'Залишок джерела'):
                             cell.number_format = '#,##0.00' if header_val != COL_AMOUNT else '[Color 10]#,##0.00;-#,##0.00;0.00'
                         elif header_val == COL_BALANCE:
