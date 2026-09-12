@@ -1,5 +1,13 @@
 # 📊 Finance Automation & Wealth Management Tracker
 
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![Pandas](https://img.shields.io/badge/Pandas-ETL%20%26%20Data%20Analysis-150458?style=for-the-badge&logo=pandas&logoColor=white)
+![Microsoft Excel](https://img.shields.io/badge/Microsoft_Excel-Dashboards%20%26%20PivotTables-217346?style=for-the-badge&logo=microsoft-excel&logoColor=white)
+![Openpyxl](https://img.shields.io/badge/Openpyxl-Excel%20Styling-007ACC?style=for-the-badge&logo=python&logoColor=white)
+![PDF Parsing](https://img.shields.io/badge/PDF_Parsing-pdfplumber-FF6F61?style=for-the-badge&logo=adobe-acrobat-reader&logoColor=white)
+![Security](https://img.shields.io/badge/Privacy-100%25_Local_Only-blueviolet?style=for-the-badge&logo=shield)
+![Status](https://img.shields.io/badge/Status-Production--Ready-brightgreen?style=for-the-badge)
+
 **Finance Automation** — це професійне Python-рішення для автоматичної консолідації сімейних фінансів та аналізу чистих активів (Net Worth) на основі сирих виписок з українських банків.
 Цей проект вирішує проблему рутини та хаосу при веденні сімейного бюджету, коли дані розкидані по різних банках. Замість щомісячного ручного перенесення транзакцій в Excel, система автоматизує весь ETL-процес — від зчитування сирих виписок до генерації інтерактивного звіту.
 Замість ручного перенесення транзакцій в Excel, система автоматично зчитує виписки у форматах PDF та Excel, дедуплікує операції, виявляє внутрішні перекази між картками членів родини, класифікує витрати за категоріями та будує красивий аналітичний дашборд.
