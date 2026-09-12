@@ -16,6 +16,56 @@
 
 ---
 
+### 🏗 Загальна архітектура системи (Data Pipeline)
+
+```mermaid
+flowchart TD
+    subgraph INGESTION["1. Джерела даних (Raw Ingestion)"]
+        A1["📄 PDF-виписки (Mono, ПУМБ, Альянс, А-Банк)"]
+        A2["📊 Excel-виписки (ПриватБанк)"]
+    end
+
+    subgraph PARSERS["2. Модуль Парсерів (parsers/)"]
+        B["⚙️ BaseParser (Абстрактний клас)"]
+        A1 --> B
+        A2 --> B
+        B --> C["Стандартизований DataFrame"]
+    end
+
+    subgraph ETL["3. Фаза ETL та Категоризація (src/data_manager.py)"]
+        C --> D["🔑 Векторний MD5-ID (make_short_id_vectorized)"]
+        D --> E["🧹 Очищення описів (_normalize_text)"]
+        E --> F["🎯 Дворежимна категоризація (Keyword First ➡️ MCC Map)"]
+        F --> G["🔍 Інкрементне злиття та дедуплікація (reconcile_and_merge)"]
+    end
+
+    subgraph CLEARING["4. Аналітичний 3-рівневий Кліринг (src/finance_logic.py)"]
+        G --> H1["👥 Twins Algorithm (Внутрішні перекази + Комісії)"]
+        G --> H2["💵 Cash Clearing (Компенсація готівки)"]
+        G --> H3["🚀 Investments & Transit (Інвестиції та транзит)"]
+    end
+
+    subgraph STORAGE["5. Data Layer (src/report_engine.py)"]
+        H1 & H2 & H3 --> I[("💾 output/Total_Ledger.xlsx")]
+        I --> I1["📋 Transactions (Raw Data Lake)"]
+        I --> I2["🟢 Income & 🔴 Expenses (Data Marts з Dynamic Split)"]
+        I --> I3["📊 Daily_Dashboard (Щоденний леджер & Net Worth)"]
+    end
+
+    subgraph PRESENTATION["6. Presentation Layer (Excel UI)"]
+        I3 --> J["📈 output/Dashboard.xlsx (KPIs, Slicers, PivotCharts)"]
+    end
+
+    style INGESTION fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
+    style PARSERS fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    style ETL fill:#e8f5e9,stroke:#388e3c,stroke-width:2px
+    style CLEARING fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+    style STORAGE fill:#fffde7,stroke:#fbc02d,stroke-width:2px
+    style PRESENTATION fill:#e0f2f1,stroke:#00796b,stroke-width:2px
+```
+
+---
+
 ### 🏦 Архітектура банківських парсерів (Multi-Bank Parser Engine)
 
 Система побудована на базі абстрактного класу `BaseParser`, що гарантує єдиний життєвий цикл обробки для будь-якого банку (зчитування -> ідентифікація -> стандартизація -> коригування). 
@@ -141,9 +191,19 @@
 
 ---
 
-### 📈 Візуалізація даних (Data Visualization)
-*   **🔌 Стан розробки**: Ця функція наразі перебуває в активній фазі розробки та тестування [1, 2].
-*   **🗺️ Що планується**: Наступним кроком проекту є побудова інтерактивного дашборду на базі бібліотек `matplotlib` / `seaborn` або через кастомну Excel-панель за допомогою `openpyxl` [2-4]. Дашборд візуалізує структуру витрат за категоріями (Pie Charts), динаміку місячного Burn Rate (Line Charts) та тренд накопичення чистих активів (Net Worth) родини [2, 3].
+### 📈 Модуль Візуалізації та Інтерактивний Дашборд (`output/Dashboard.xlsx`)
+
+Для наочного аналізу фінансових потоків реалізовано двофайлову архітектуру (**Decoupled Data & Presentation Layer**). Це розділяє автоматичну обробку даних Python та візуальну аналітику в Excel, забезпечуючи 100% збереження оформлення, кастомних зведених таблиць та слайсерів.
+
+#### 🏗 Архітектура рішення:
+1. **`output/Total_Ledger.xlsx` (Data Layer)** — локальна база даних (Data Lake / Marts), яка автоматично генерується та оновлюється Python-скриптом.
+2. **`output/Dashboard.xlsx` (Presentation Layer)** — інтерактивний управлінський дашборд, що містить аналітичні панелі, графіки та зрізи.
+
+#### 📊 Ключовий функціонал дашборду:
+* **Картки показників (KPI Cards)**: фіксують ключові фінансові метрики (загальний дохід, витрати та поточний профіцит/дефіцит).
+* **Динамічні зрізи (Slicers)**: інтерактивна фільтрація всіх графіків та карт за вибраними місяцями в один клік.
+* **Ієрархічні діаграми (Drill-Down PivotCharts)**: дворічне групування дат (`Місяць` ➡️ `Дата`), що дозволяє переключатися між загальним місячним трендом та деталізацією по днях.
+* **Пряме джерело даних (PivotTable External Data Source)**: зведені таблиці в `Dashboard.xlsx` прив'язані безпосередньо до колоночних діапазонів файлу `Total_Ledger.xlsx`. Завдяки цьому нові транзакції, оброблені Python, підтягуються на дашборд простою кнопкою **«Оновити все» (Data -> Refresh All)**.
 
 ---
 
