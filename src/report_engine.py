@@ -487,7 +487,7 @@ def save_final_ledger(df: pd.DataFrame, df_dash: Optional[pd.DataFrame] = None, 
                     # Налаштування форматів чисел
                     for row_idx in range(2, sheet.max_row + 1):
                         cell = sheet.cell(row=row_idx, column=col[0].column)
-                        if header_val == 'Дата':
+                        if sheet.title == 'Daily_Dashboard' and header_val == 'Дата':
                             cell.number_format = 'DD.MM.YYYY'
                         elif header_val in (COL_DATE, 'Дата зняття', 'Дата поповнення', 'Дата відправки/зняття', 'Дата отримання/поповнення'):
                             cell.number_format = 'DD.MM.YYYY HH:mm:ss'
