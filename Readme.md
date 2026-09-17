@@ -1,6 +1,8 @@
 # 📊 Finance Automation &amp; Wealth Management Tracker
 ![Python Version](https://img.shields.io/badge/python-3.12-blue.svg) ![Pandas](https://img.shields.io/badge/pandas-2.2-150458.svg) ![Excel](https://img.shields.io/badge/Excel-openpyxl-1F4E78.svg) ![License](https://img.shields.io/badge/license-MIT-green.svg) ![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)
 
+[ 🌐 Read in English ](README_EN.md)
+
 **Finance Automation** — це локальний інженерний ETL-конвеєр (Extract, Transform, Load) для автоматичної консолідації сімейних фінансів та розрахунку реальних чистих активів (**Net Worth**) на основі сирих виписок з українських банків. Система розроблена для персонального використання та вирішує проблему хаосу при веденні бюджету з **12+ унікальних карток у 5+ банках України** (ПриватБанк, Monobank, ПУМБ, А-Банк, Банк Альянс). Замість щомісячної ручної рутини перенесення транзакцій в Excel, Python-скрипт за лічені секунди здійснює парсинг PDF/Excel файлів, дедуплікацію, інтелектуальне очищення від "фінансового шуму" та формує двошарову управлінську звітність.
 
  ---
